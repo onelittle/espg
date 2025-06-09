@@ -85,7 +85,7 @@ async fn main() -> espg::Result<()> {
     let mut active_accounts = 0;
     let mut total_balance = 0;
 
-    let mut stream = event_store.stream().await;
+    let mut stream = event_store.stream().await.take(6);
 
     {
         let mut event_store = event_store.clone();
@@ -122,8 +122,7 @@ async fn main() -> espg::Result<()> {
         update_stats_display(active_accounts, total_balance);
     }
 
-    drop(stream); // Ensure the stream is dropped to stop listening for events
-    let mut stream = event_store.stream().await;
+    let mut stream = event_store.stream().await.take(2);
     async {
         let mut event_store = event_store.clone();
         let mut commands = Commands::new(&mut event_store);
