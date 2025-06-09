@@ -79,13 +79,11 @@ where
         {
             let mut store = self.store.write().await;
             let previous_commit = store.entry(id.to_string()).or_default();
-            if previous_commit.0 != version {
+            if previous_commit.0 >= version {
                 #[cfg(test)]
-                {
-                    self.version_conflicts
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
-                return Err(Error::VersionConflict);
+                self.version_conflicts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(Error::VersionConflict(version));
             }
             previous_commit.0 += 1;
             previous_commit.1.push(action.clone());
@@ -105,6 +103,7 @@ where
             .ok_or(Error::NotFound("Aggregate not found".to_string()))?;
         Ok(Commit {
             version: stored_commit.0,
+            diagnostics: None,
             inner: stored_commit
                 .1
                 .iter()

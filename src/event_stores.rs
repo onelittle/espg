@@ -10,14 +10,20 @@ use tokio_stream::Stream;
 pub enum Error {
     NotFound(String),
     AccessConflict,
-    VersionConflict,
+    VersionConflict(usize),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub struct Diagnostics {
+    pub loaded_events: usize,
+    pub snapshotted: bool,
+}
+
 pub struct Commit<T> {
     pub version: usize,
     pub inner: T,
+    pub diagnostics: Option<Diagnostics>,
 }
 
 #[allow(async_fn_in_trait)]
@@ -62,6 +68,7 @@ where
         Ok(Commit {
             version: events.version,
             inner: T::from_slice(&events.inner),
+            diagnostics: None,
         })
     }
     async fn get_commit(&self, id: &str) -> Option<Commit<T>> {

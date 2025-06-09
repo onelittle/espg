@@ -2,8 +2,11 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio_postgres::{GenericClient, Transaction, types::Json};
 
-use super::Result;
-use crate::{Aggregate, EventStore, event_stores::Commit};
+use super::{Error, Result};
+use crate::{
+    Aggregate, EventStore,
+    event_stores::{Commit, Diagnostics},
+};
 
 pub struct PostgresEventStore<T> {
     client: tokio_postgres::Client,
@@ -60,8 +63,14 @@ where
     }
 
     pub async fn clear(&self) -> std::result::Result<(), tokio_postgres::Error> {
-        self.client.execute("DELETE FROM events", &[]).await?;
-        self.client.execute("DELETE FROM snapshots", &[]).await?;
+        self.client
+            .batch_execute(
+                r#"
+                DELETE FROM events;
+                DELETE FROM snapshots;
+            "#,
+            )
+            .await?;
         Ok(())
     }
 
@@ -71,7 +80,7 @@ where
             .transaction()
             .await
             .expect("Failed to start transaction");
-        PostgresEventStoreTransaction::new(transaction).await
+        PostgresEventStoreTransaction::new(transaction, self.snapshot_interval).await
     }
 
     pub fn client(self) -> tokio_postgres::Client {
@@ -92,7 +101,7 @@ where
     pub async fn complete(self) -> Result<()> {
         self.transaction.commit().await.map_err(|e| {
             if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
-                super::Error::VersionConflict
+                todo!("Handle potential multiple version conflicts in transactions");
             } else {
                 panic!("Failed to commit transaction: {}", e)
             }
@@ -105,11 +114,11 @@ impl<'r, T> PostgresEventStoreTransaction<'r, T>
 where
     T: Aggregate,
 {
-    async fn new(transaction: tokio_postgres::Transaction<'r>) -> Self {
+    async fn new(transaction: tokio_postgres::Transaction<'r>, snapshot_interval: usize) -> Self {
         PostgresEventStoreTransaction {
             r#type: std::marker::PhantomData,
             transaction,
-            snapshot_interval: 10,
+            snapshot_interval,
         }
     }
 
@@ -180,24 +189,32 @@ where
         let rows = self
             .get_client()
             .query(
-                "SELECT version, action FROM events WHERE aggregate_id = $1 AND version > $2 ORDER BY version",
-                &[&id, &(version as i32)],
+                "SELECT version, action FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version > $3 ORDER BY version",
+                &[&id, &T::name(), &(version as i32)],
             )
             .await
             .expect("Failed to query events");
 
-        let mut events = Vec::new();
-        let mut version: usize = 0;
-        for row in rows {
-            version = row.get::<_, i32>(0) as usize;
-            let action: Value = row.get(1);
-            let event: T::Event =
-                serde_json::from_value(action).expect("Failed to deserialize action");
-            events.push(event);
+        let version = rows
+            .last()
+            .map(|row| row.get::<_, i32>(0) as usize)
+            .unwrap_or(version);
+
+        if version == 0 {
+            return Err(Error::NotFound("No events found".to_string()));
         }
+
+        let events: Vec<T::Event> = rows
+            .into_iter()
+            .map(|row| {
+                let action: Value = row.get(1);
+                serde_json::from_value(action).expect("Failed to deserialize action")
+            })
+            .collect();
 
         Ok(super::Commit {
             version,
+            diagnostics: None,
             inner: events,
         })
     }
@@ -210,6 +227,10 @@ where
                     .await?;
                 Ok(Commit {
                     version: events.version,
+                    diagnostics: Some(Diagnostics {
+                        loaded_events: events.inner.len(),
+                        snapshotted: true,
+                    }),
                     inner: events.inner.iter().fold(snapshot_commit.inner, T::reduce),
                 })
             }
@@ -217,6 +238,10 @@ where
                 let events = self.try_get_events(id).await?;
                 Ok(Commit {
                     version: events.version,
+                    diagnostics: Some(Diagnostics {
+                        loaded_events: events.inner.len(),
+                        snapshotted: false,
+                    }),
                     inner: T::from_slice(&events.inner),
                 })
             }
@@ -226,23 +251,22 @@ where
     async fn commit(&mut self, id: &str, version: usize, action: T::Event) -> Result<()> {
         let json_action: Value =
             serde_json::to_value(action.clone()).expect("Failed to serialize action");
-        let version: i32 = version as i32;
-        let result = self.get_mut_client()
-            .query_one(
-                "INSERT INTO events (aggregate_id, aggregate_type, version, action) VALUES ($1, $2, $3, $4) RETURNING version",
-                &[&id, &T::name(), &version, &json_action],
+        let client = self.get_mut_client();
+        client
+            .execute(
+                "INSERT INTO events (aggregate_id, aggregate_type, version, action) VALUES ($1, $2, $3, $4)",
+                &[&id, &T::name(), &(version as i32), &json_action],
             )
             .await
             .map_err(|e| {
                 if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
-                    super::Error::VersionConflict
+                    Error::VersionConflict(version)
                 } else {
                     panic!("Failed to insert event: {}", e)
                 }
             })?;
 
-        if (result.get::<_, i32>(0) as usize) % self.snapshot_interval() == 0 {
-            eprintln!("Storing snapshot for aggregate {}", id);
+        if version % self.snapshot_interval() == 0 {
             self.store_snapshot(id).await?;
         }
 
@@ -251,7 +275,11 @@ where
 
     async fn store_snapshot(&mut self, id: &str) -> Result<()> {
         if let Some(key) = T::snapshot_key() {
-            let Commit { version, inner } = self.try_get_commit(id).await?;
+            let Commit {
+                version,
+                diagnostics: _,
+                inner,
+            } = self.try_get_commit(id).await?;
             let snapshot: Value =
                 serde_json::to_value(inner).expect("Failed to serialize snapshot");
             self.get_mut_client()
@@ -284,26 +312,46 @@ where
                 let version = row.get::<'_, _, i32>(0) as usize;
                 let snapshot_col: Json<T> = row.get(1);
                 let inner = snapshot_col.0;
-                return Ok(Some(Commit { version, inner }));
+                return Ok(Some(Commit {
+                    version,
+                    diagnostics: Some(Diagnostics {
+                        loaded_events: 0,
+                        snapshotted: true,
+                    }),
+                    inner,
+                }));
             }
         }
         Ok(None)
     }
 
     async fn append(&mut self, id: &str, action: T::Event) -> Result<()> {
-        let version = {
-            let row = self
-                .get_mut_client()
-                .query_one(
-                    "SELECT COALESCE(MAX(version), 0) FROM events WHERE aggregate_id = $1 AND aggregate_type = $2",
-                    &[&id, &T::name()],
-                )
-                .await
-                .expect("Failed to query max version");
-            row.get::<_, i32>(0)
+        let mut version = {
+            match self.try_get_commit(id).await {
+                Ok(commit) => commit.version + 1,
+                Err(Error::NotFound(_)) => 1,
+                Err(e) => return Err(e),
+            }
         };
-        self.commit(id, (version + 1) as usize, action.clone())
-            .await
+        let mut attempts_left = 3; // Limit the number of retries to avoid infinite loops
+        loop {
+            match self.commit(id, version, action.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(Error::VersionConflict(previous_version)) => {
+                    eprintln!(
+                        "Version conflict detected, retrying with {}...",
+                        previous_version
+                    );
+                    version = previous_version + 1;
+                }
+                Err(e) => return Err(e),
+            }
+
+            attempts_left -= 1;
+            if attempts_left == 0 {
+                return Err(Error::VersionConflict(version));
+            }
+        }
     }
 }
 
@@ -366,6 +414,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_missing_aggregate() -> Result<()> {
+        let event_store = init_event_store()
+            .await
+            .expect("msg: Failed to create event store");
+
+        let aggregate = event_store.get_aggregate("missing").await;
+        assert!(aggregate.is_none(), "Expected None for missing aggregate");
+        let events = event_store.try_get_events("missing").await;
+        assert!(
+            matches!(events, Err(crate::Error::NotFound(_))),
+            "Expected NotFound error"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_commit_conflict() -> Result<()> {
         let mut event_store = init_event_store()
             .await
@@ -416,13 +481,50 @@ mod tests {
             .await
             .expect("msg: Failed to create event store");
 
-        for _ in 0..20 {
+        for _ in 0..22 {
             event_store.append("test4", Event::Increment(1)).await?;
         }
 
         let snapshot = event_store.load_snapshot("test4").await?;
-
         assert!(snapshot.is_some(), "Snapshot should exist");
+        let snapshot = snapshot.unwrap();
+        let diag = snapshot.diagnostics.unwrap();
+        assert!(diag.snapshotted, "Snapshot should be marked as snapshotted");
+        assert_eq!(
+            diag.loaded_events, 0,
+            "No events should be loaded from snapshot"
+        );
+        assert_eq!(snapshot.inner.value, 20, "Snapshot value should be 20");
+
+        let commit = event_store
+            .get_commit("test4")
+            .await
+            .expect("Aggregate not found");
+        let diag = commit.diagnostics.unwrap();
+        assert!(diag.snapshotted, "Commit should be snapshotted");
+        let aggregate = commit.inner;
+        assert_eq!(aggregate.value, 22, "Aggregate value should be 22");
+        assert_eq!(
+            diag.loaded_events, 2,
+            "Four events should be loaded from commit"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_inheriting_snapshot_interval() -> Result<()> {
+        let mut event_store = init_event_store()
+            .await
+            .expect("msg: Failed to create event store");
+
+        let parent_interval = event_store.snapshot_interval();
+        let transaction = event_store.begin().await;
+        assert_eq!(
+            parent_interval,
+            transaction.snapshot_interval(),
+            "Snapshot intervals should match"
+        );
 
         Ok(())
     }
