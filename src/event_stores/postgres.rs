@@ -74,13 +74,9 @@ where
         Ok(())
     }
 
-    pub async fn begin<'b>(&'b mut self) -> PostgresEventStoreTransaction<'b, T> {
-        let transaction: Transaction<'b> = self
-            .client
-            .transaction()
-            .await
-            .expect("Failed to start transaction");
-        PostgresEventStoreTransaction::new(transaction, self.snapshot_interval).await
+    pub async fn begin<'b>(&'b mut self) -> Result<PostgresEventStoreTransaction<'b, T>> {
+        let transaction: Transaction<'b> = self.client.transaction().await?;
+        Ok(PostgresEventStoreTransaction::new(transaction, self.snapshot_interval).await)
     }
 
     pub fn client(self) -> tokio_postgres::Client {
@@ -99,13 +95,17 @@ where
     T: Aggregate,
 {
     pub async fn complete(self) -> Result<()> {
-        self.transaction.commit().await.map_err(|e| {
-            if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
-                todo!("Handle potential multiple version conflicts in transactions");
-            } else {
-                panic!("Failed to commit transaction: {}", e)
-            }
-        })?;
+        self.transaction
+            .commit()
+            .await
+            .map_err(|e| {
+                if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
+                    todo!("Handle potential multiple version conflicts in transactions");
+                } else {
+                    panic!("Failed to commit transaction: {}", e)
+                }
+            })
+            .expect("Failed to commit transaction");
         Ok(())
     }
 }
@@ -123,10 +123,7 @@ where
     }
 
     pub async fn rollback(self) -> Result<()> {
-        self.transaction
-            .rollback()
-            .await
-            .map_err(|e| panic!("Failed to rollback transaction: {}", e))?;
+        self.transaction.rollback().await?;
         Ok(())
     }
 }
@@ -194,8 +191,7 @@ where
                 "SELECT version, action FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version > $3 ORDER BY version",
                 &[&id, &T::name(), &(version as i32)],
             )
-            .await
-            .expect("Failed to query events");
+            .await?;
 
         let version = rows
             .last()
@@ -206,13 +202,11 @@ where
             return Err(Error::NotFound("No events found".to_string()));
         }
 
-        let events: Vec<T::Event> = rows
-            .into_iter()
-            .map(|row| {
-                let action: Value = row.get(1);
-                serde_json::from_value(action).expect("Failed to deserialize action")
-            })
-            .collect();
+        let mut events: Vec<T::Event> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let action: Value = row.get(1);
+            events.push(serde_json::from_value(action)?);
+        }
 
         Ok(super::Commit {
             version,
@@ -251,8 +245,7 @@ where
     }
 
     async fn commit(&mut self, id: &str, version: usize, action: T::Event) -> Result<()> {
-        let json_action: Value =
-            serde_json::to_value(action.clone()).expect("Failed to serialize action");
+        let json_action: Value = serde_json::to_value(action.clone())?;
         let client = self.get_mut_client();
         client
             .execute(
@@ -282,8 +275,7 @@ where
                 diagnostics: _,
                 inner,
             } = self.try_get_commit(id).await?;
-            let snapshot: Value =
-                serde_json::to_value(inner).expect("Failed to serialize snapshot");
+            let snapshot: Value = serde_json::to_value(inner)?;
             self.get_mut_client()
                 .execute(
                     r#"
@@ -293,8 +285,7 @@ where
             "#,
                     &[&id, &T::name(), &key, &(version as i32), &snapshot],
                 )
-                .await
-                .expect("Failed to insert snapshot");
+                .await?;
         }
         Ok(())
     }
@@ -307,8 +298,7 @@ where
                     "SELECT version, snapshot FROM snapshots WHERE aggregate_id = $1 AND aggregate_type = $2 AND key = $3",
                     &[&id, &T::name(), &key],
                 )
-                .await
-                .expect("Failed to query snapshot");
+                .await?;
 
             if let Some(row) = row {
                 let version = row.get::<'_, _, i32>(0) as usize;
@@ -358,6 +348,8 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::tests::{Event, State};
@@ -396,7 +388,7 @@ mod tests {
             .await
             .expect("msg: Failed to create event store");
 
-        let mut transaction = event_store.begin().await;
+        let mut transaction = event_store.begin().await?;
 
         transaction.append("test1", Event::Increment(10)).await?;
         transaction.append("test1", Event::Decrement(4)).await?;
@@ -459,11 +451,11 @@ mod tests {
             .await
             .expect("msg: Failed to create event store");
 
-        let mut transaction = event_store.begin().await;
+        let mut transaction = event_store.begin().await?;
         transaction.append("test3", Event::Increment(10)).await?;
         transaction.complete().await?;
 
-        let mut transaction = event_store.begin().await;
+        let mut transaction = event_store.begin().await?;
         transaction.append("test3", Event::Decrement(4)).await?;
         transaction.rollback().await?;
 
@@ -521,7 +513,7 @@ mod tests {
             .expect("msg: Failed to create event store");
 
         let parent_interval = event_store.snapshot_interval();
-        let transaction = event_store.begin().await;
+        let transaction = event_store.begin().await?;
         assert_eq!(
             parent_interval,
             transaction.snapshot_interval(),

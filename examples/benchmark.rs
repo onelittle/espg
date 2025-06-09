@@ -72,6 +72,8 @@ impl<'a> Commands<'a> {
 }
 
 #[tokio::main]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used)]
 async fn main() {
     let instant = std::time::Instant::now();
 

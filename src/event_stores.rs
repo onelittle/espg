@@ -6,11 +6,18 @@ pub use in_memory::InMemoryEventStore;
 pub use postgres::PostgresEventStore;
 use tokio_stream::Stream;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Aggregate is not found: {0}")]
     NotFound(String),
+    #[error("Access conflict")]
     AccessConflict,
+    #[error("Version conflict: {0}")]
     VersionConflict(usize),
+    #[error("tokio_postgres error: {0}")]
+    TokioPgError(#[from] tokio_postgres::Error),
+    #[error("serde_json error: {0}")]
+    SerdeJsonError(#[from] serde_json::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
