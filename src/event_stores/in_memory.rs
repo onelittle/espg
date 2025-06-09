@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -64,6 +65,8 @@ where
     T: Aggregate,
     T::Event: Clone + Send + 'static,
 {
+    type StoreError = Infallible;
+
     async fn append(&mut self, id: &str, action: T::Event) -> Result<()> {
         {
             let mut store = self.store.write().await;

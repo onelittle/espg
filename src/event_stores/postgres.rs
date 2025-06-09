@@ -181,6 +181,8 @@ where
     T: Aggregate + Serialize + DeserializeOwned,
     T::Event: Clone + Serialize + DeserializeOwned + std::fmt::Debug,
 {
+    type StoreError = tokio_postgres::Error;
+
     async fn try_get_events_since(
         &self,
         id: &str,

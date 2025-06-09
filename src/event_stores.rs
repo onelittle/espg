@@ -49,6 +49,8 @@ pub trait EventStore<T>
 where
     T: Aggregate,
 {
+    type StoreError;
+
     async fn append(&mut self, id: &str, event: T::Event) -> Result<()>;
     async fn commit(&mut self, id: &str, version: usize, event: T::Event) -> Result<()>;
     async fn try_get_events_since(&self, id: &str, version: usize)
