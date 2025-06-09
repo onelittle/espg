@@ -1,0 +1,15 @@
+[package]
+name = "espg"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+indexmap = { version = "2.9.0", features = ["serde"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+tokio-postgres = { version = "0.7.13", features = ["with-serde_json-1"] }
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+
+[features]
+tokio = []
