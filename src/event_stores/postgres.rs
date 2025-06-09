@@ -176,7 +176,7 @@ where
 impl<T, U: WithGenericClient<T> + GenericPostgresEventStore> EventStore<T> for U
 where
     T: Aggregate + Serialize + DeserializeOwned,
-    T::Event: Clone + Serialize + DeserializeOwned + std::fmt::Debug,
+    T::Event: Clone + Serialize + DeserializeOwned,
 {
     type StoreError = tokio_postgres::Error;
 

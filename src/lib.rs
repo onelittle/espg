@@ -17,7 +17,7 @@ mod tests {
         pub value: i32,
     }
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     pub enum Event {
         Increment(i32),
         Decrement(i32),
