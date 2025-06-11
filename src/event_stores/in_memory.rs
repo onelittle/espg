@@ -8,7 +8,7 @@ use tokio::sync::broadcast::error::SendError;
 use tokio_stream::{Stream, wrappers::BroadcastStream};
 
 use super::{Commit, Error, EventStore, Result};
-use crate::{Aggregate, event_stores::StreamingEventStore};
+use crate::Aggregate;
 
 type CommitTuple<T> = (usize, Vec<T>);
 
@@ -19,8 +19,8 @@ where
     T: Aggregate,
 {
     pub(crate) store: Arc<RwLock<IndexMap<String, CommitTuple<T::Event>>>>,
-    broadcast: tokio::sync::broadcast::Sender<T::Event>,
-    _rx: tokio::sync::broadcast::Receiver<T::Event>,
+    broadcast: tokio::sync::broadcast::Sender<Commit<T::Event>>,
+    _rx: tokio::sync::broadcast::Receiver<Commit<T::Event>>,
     #[cfg(test)]
     pub(crate) version_conflicts: AtomicUsize,
 }
@@ -48,7 +48,7 @@ where
     T::Event: Clone,
 {
     fn default() -> Self {
-        let (tx, rx) = tokio::sync::broadcast::channel::<T::Event>(100);
+        let (tx, rx) = tokio::sync::broadcast::channel::<Commit<T::Event>>(100);
         InMemoryEventStore {
             store: Arc::new(RwLock::new(IndexMap::new())),
             broadcast: tx,
@@ -59,27 +59,34 @@ where
     }
 }
 
-#[cfg(not(feature = "tokio"))]
 impl<T> EventStore<T> for InMemoryEventStore<T>
 where
-    T: Aggregate,
+    T: Aggregate + Default,
     T::Event: Clone + Send + 'static,
 {
     type StoreError = Infallible;
+    type StreamError = tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
-    async fn append(&mut self, id: &str, action: T::Event) -> Result<()> {
-        {
+    async fn append(&self, id: &str, action: T::Event) -> Result<()> {
+        let version = {
             let mut store = self.store.write().await;
             let previous_commit = store.entry(id.to_string()).or_default();
             previous_commit.0 += 1;
             previous_commit.1.push(action.clone());
-        }
-        self.transmit(id, action).await?;
+            previous_commit.0
+        };
+        let commit = Commit {
+            id: id.to_string(),
+            version, // Version is not used in this context
+            inner: action,
+            diagnostics: None,
+        };
+        self.transmit(id, commit).await?;
         Ok(())
     }
 
-    async fn commit(&mut self, id: &str, version: usize, action: T::Event) -> Result<()> {
-        {
+    async fn commit(&self, id: &str, version: usize, action: T::Event) -> Result<()> {
+        let version = {
             let mut store = self.store.write().await;
             let previous_commit = store.entry(id.to_string()).or_default();
             if previous_commit.0 >= version {
@@ -90,8 +97,15 @@ where
             }
             previous_commit.0 += 1;
             previous_commit.1.push(action.clone());
-        }
-        self.transmit(id, action).await?;
+            previous_commit.0
+        };
+        let commit = Commit {
+            id: id.to_string(),
+            version,
+            inner: action,
+            diagnostics: None,
+        };
+        self.transmit(id, commit).await?;
         Ok(())
     }
 
@@ -105,6 +119,7 @@ where
             .get(id)
             .ok_or(Error::NotFound("Aggregate not found".to_string()))?;
         Ok(Commit {
+            id: id.to_string(),
             version: stored_commit.0,
             diagnostics: None,
             inner: stored_commit
@@ -117,15 +132,9 @@ where
                 .collect(),
         })
     }
-}
 
-impl<T, E> StreamingEventStore<T> for InMemoryEventStore<T>
-where
-    T: Aggregate<Event = E>,
-    E: Clone + Send + 'static,
-{
-    async fn transmit(&mut self, _: &str, event: T::Event) -> Result<()> {
-        match &self.broadcast.send(event.clone()) {
+    async fn transmit(&self, _: &str, commit: Commit<T::Event>) -> Result<()> {
+        match &self.broadcast.send(commit) {
             Ok(_) => {}
             Err(SendError(_event)) => {
                 eprintln!("Stream closed, cannot send event");
@@ -137,9 +146,12 @@ where
     async fn stream(
         &self,
     ) -> impl Stream<
-        Item = std::result::Result<E, tokio_stream::wrappers::errors::BroadcastStreamRecvError>,
+        Item = std::result::Result<
+            Commit<T::Event>,
+            tokio_stream::wrappers::errors::BroadcastStreamRecvError,
+        >,
     > {
-        BroadcastStream::new(self.broadcast.subscribe()) as BroadcastStream<E>
+        BroadcastStream::new(self.broadcast.subscribe()) as BroadcastStream<Commit<T::Event>>
     }
 }
 
@@ -154,7 +166,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_in_memory_commands() -> Result<(), crate::event_stores::Error> {
-        let mut event_store: InMemoryEventStore<State> = Default::default();
+        let event_store: InMemoryEventStore<State> = Default::default();
 
         event_store.append("test1", Event::Increment(10)).await?;
         event_store.append("test1", Event::Decrement(4)).await?;
@@ -185,7 +197,7 @@ mod tests {
 
         let handles: Vec<_> = (0..10)
             .map(|i| {
-                let mut store = event_store.clone();
+                let store = event_store.clone();
                 tokio::spawn(async move {
                     store.append("test2", Event::Increment(i)).await.unwrap();
                 })

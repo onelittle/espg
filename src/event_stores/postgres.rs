@@ -1,29 +1,53 @@
-use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
-use tokio_postgres::{GenericClient, Transaction, types::Json};
+use std::{convert::Infallible, sync::Arc};
 
 use super::{Error, Result};
 use crate::{
     Aggregate, EventStore,
     event_stores::{Commit, Diagnostics},
 };
+use futures::{FutureExt, TryStreamExt};
+use futures::{StreamExt, stream};
+use futures_channel::mpsc;
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_postgres::{
+    AsyncMessage, GenericClient, Row,
+    types::{FromSql, Json},
+};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 pub struct PostgresEventStore<T> {
-    client: tokio_postgres::Client,
+    client: Arc<tokio_postgres::Client>,
     aggregate_type: std::marker::PhantomData<T>,
     snapshot_interval: usize,
 }
 
-impl<T> PostgresEventStore<T>
+impl<'b, T> PostgresEventStore<T>
 where
     T: Aggregate,
 {
-    pub async fn new(client: tokio_postgres::Client) -> Self {
+    pub async fn new(client: Arc<tokio_postgres::Client>) -> Self {
         PostgresEventStore {
             client,
             aggregate_type: std::marker::PhantomData,
             snapshot_interval: 10,
         }
+    }
+
+    pub async fn begin(
+        &'b mut self,
+    ) -> std::result::Result<PostgresEventStoreTransaction<'b, T>, tokio_postgres::Error> {
+        #[allow(clippy::expect_used)]
+        let transaction = Arc::get_mut(&mut self.client)
+            .expect("Client must be unique to begin a transaction")
+            .transaction()
+            .await?;
+        Ok(PostgresEventStoreTransaction {
+            transaction,
+            snapshot_interval: self.snapshot_interval,
+            r#type: std::marker::PhantomData,
+        })
     }
 
     pub async fn initialize(&self) -> std::result::Result<(), tokio_postgres::Error> {
@@ -73,53 +97,19 @@ where
             .await?;
         Ok(())
     }
-
-    pub async fn begin<'b>(&'b mut self) -> Result<PostgresEventStoreTransaction<'b, T>> {
-        let transaction: Transaction<'b> = self.client.transaction().await?;
-        Ok(PostgresEventStoreTransaction::new(transaction, self.snapshot_interval).await)
-    }
-
-    pub fn client(self) -> tokio_postgres::Client {
-        self.client
-    }
 }
 
-pub struct PostgresEventStoreTransaction<'r, T> {
-    transaction: tokio_postgres::Transaction<'r>,
+pub struct PostgresEventStoreTransaction<'a, T> {
+    transaction: tokio_postgres::Transaction<'a>,
     snapshot_interval: usize,
     r#type: std::marker::PhantomData<T>,
 }
 
-impl<'r, T> PostgresEventStoreTransaction<'r, T>
-where
-    T: Aggregate,
-{
+impl<'a, T> PostgresEventStoreTransaction<'a, T> {
     pub async fn complete(self) -> Result<()> {
-        self.transaction
-            .commit()
-            .await
-            .map_err(|e| {
-                if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
-                    todo!("Handle potential multiple version conflicts in transactions");
-                } else {
-                    panic!("Failed to commit transaction: {}", e)
-                }
-            })
-            .expect("Failed to commit transaction");
+        // TODO: Handle potential conflicts
+        self.transaction.commit().await?;
         Ok(())
-    }
-}
-
-impl<'r, T> PostgresEventStoreTransaction<'r, T>
-where
-    T: Aggregate,
-{
-    async fn new(transaction: tokio_postgres::Transaction<'r>, snapshot_interval: usize) -> Self {
-        PostgresEventStoreTransaction {
-            r#type: std::marker::PhantomData,
-            transaction,
-            snapshot_interval,
-        }
     }
 
     pub async fn rollback(self) -> Result<()> {
@@ -128,17 +118,19 @@ where
     }
 }
 
-trait GenericPostgresEventStore {}
-impl<T> GenericPostgresEventStore for PostgresEventStore<T> {}
-impl<T> GenericPostgresEventStore for PostgresEventStoreTransaction<'_, T> {}
+mod private {
+    pub trait Sealed {}
+}
 
-trait WithGenericClient<B>
+impl<T> private::Sealed for PostgresEventStore<T> {}
+impl<T> private::Sealed for PostgresEventStoreTransaction<'_, T> {}
+
+trait WithGenericClient<B>: private::Sealed
 where
     B: Aggregate,
 {
     fn snapshot_interval(&self) -> usize;
     fn get_client(&self) -> &impl tokio_postgres::GenericClient;
-    fn get_mut_client(&mut self) -> &mut impl tokio_postgres::GenericClient;
 }
 
 impl<T> WithGenericClient<T> for PostgresEventStore<T>
@@ -149,11 +141,7 @@ where
         self.snapshot_interval
     }
     fn get_client(&self) -> &impl tokio_postgres::GenericClient {
-        &self.client
-    }
-
-    fn get_mut_client(&mut self) -> &mut impl tokio_postgres::GenericClient {
-        &mut self.client
+        self.client.as_ref()
     }
 }
 
@@ -167,18 +155,15 @@ where
     fn get_client(&self) -> &impl tokio_postgres::GenericClient {
         &self.transaction
     }
-
-    fn get_mut_client(&mut self) -> &mut impl tokio_postgres::GenericClient {
-        &mut self.transaction
-    }
 }
 
-impl<T, U: WithGenericClient<T> + GenericPostgresEventStore> EventStore<T> for U
+impl<T, U: WithGenericClient<T>> EventStore<T> for U
 where
-    T: Aggregate + Serialize + DeserializeOwned,
-    T::Event: Clone + Serialize + DeserializeOwned,
+    T: Aggregate + Default + Serialize + DeserializeOwned,
+    T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
 {
     type StoreError = tokio_postgres::Error;
+    type StreamError = Infallible;
 
     async fn try_get_events_since(
         &self,
@@ -209,6 +194,7 @@ where
         }
 
         Ok(super::Commit {
+            id: id.to_string(),
             version,
             diagnostics: None,
             inner: events,
@@ -222,6 +208,7 @@ where
                     .try_get_events_since(id, snapshot_commit.version)
                     .await?;
                 Ok(Commit {
+                    id: id.to_string(),
                     version: events.version,
                     diagnostics: Some(Diagnostics {
                         loaded_events: events.inner.len(),
@@ -233,6 +220,7 @@ where
             None => {
                 let events = self.try_get_events(id).await?;
                 Ok(Commit {
+                    id: id.to_string(),
                     version: events.version,
                     diagnostics: Some(Diagnostics {
                         loaded_events: events.inner.len(),
@@ -244,9 +232,9 @@ where
         }
     }
 
-    async fn commit(&mut self, id: &str, version: usize, action: T::Event) -> Result<()> {
+    async fn commit(&self, id: &str, version: usize, action: T::Event) -> Result<()> {
         let json_action: Value = serde_json::to_value(action.clone())?;
-        let client = self.get_mut_client();
+        let client = self.get_client();
         client
             .execute(
                 "INSERT INTO events (aggregate_id, aggregate_type, version, action) VALUES ($1, $2, $3, $4)",
@@ -265,18 +253,31 @@ where
             self.store_snapshot(id).await?;
         }
 
+        self.transmit(
+            id,
+            Commit {
+                id: id.to_string(),
+                version,
+                diagnostics: None,
+                inner: action,
+            },
+        )
+        .await?;
+        eprintln!("Committed event for {}: version {}", id, version);
+
         Ok(())
     }
 
-    async fn store_snapshot(&mut self, id: &str) -> Result<()> {
+    async fn store_snapshot(&self, id: &str) -> Result<()> {
         if let Some(key) = T::snapshot_key() {
             let Commit {
+                id: _,
                 version,
                 diagnostics: _,
                 inner,
             } = self.try_get_commit(id).await?;
             let snapshot: Value = serde_json::to_value(inner)?;
-            self.get_mut_client()
+            self.get_client()
                 .execute(
                     r#"
                     INSERT INTO snapshots (aggregate_id, aggregate_type, key, version, snapshot)
@@ -305,6 +306,7 @@ where
                 let snapshot_col: Json<T> = row.get(1);
                 let inner = snapshot_col.0;
                 return Ok(Some(Commit {
+                    id: id.to_string(),
                     version,
                     diagnostics: Some(Diagnostics {
                         loaded_events: 0,
@@ -317,7 +319,7 @@ where
         Ok(None)
     }
 
-    async fn append(&mut self, id: &str, action: T::Event) -> Result<()> {
+    async fn append(&self, id: &str, action: T::Event) -> Result<()> {
         let mut version = {
             match self.try_get_commit(id).await {
                 Ok(commit) => commit.version + 1,
@@ -345,29 +347,200 @@ where
             }
         }
     }
+
+    async fn transmit(&self, _id: &str, commit: Commit<<T as Aggregate>::Event>) -> Result<()> {
+        let client = self.get_client();
+
+        // Execute listen/notify
+        client
+            .execute(
+                r#"
+             SELECT pg_notify('event_notifications', $1)
+             "#,
+                &[&serde_json::to_string(&commit)?],
+            )
+            .await?;
+
+        Ok(())
+    }
+}
+
+// Utility struct to handle inaccessible clients
+#[allow(dead_code)]
+pub struct DeadClient(tokio_postgres::Client);
+
+pub async fn stream<T, U, V>(
+    client: tokio_postgres::Client,
+    mut connection: tokio_postgres::Connection<U, V>,
+) -> Result<(UnboundedReceiverStream<Commit<T::Event>>, DeadClient)>
+where
+    T: Aggregate,
+    T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
+    U: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    V: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (tx, mut rx) = mpsc::unbounded();
+    let stream =
+        stream::poll_fn(move |cx| connection.poll_message(cx)).map_err(|e| panic!("{}", e));
+    #[allow(clippy::unwrap_used)]
+    let connection = stream.forward(tx).map(|r| r.unwrap());
+    tokio::spawn(connection);
+
+    #[allow(clippy::expect_used)]
+    client.batch_execute("LISTEN event_notifications;").await?;
+
+    let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel::<Commit<T::Event>>();
+    let mut max_version_seen = None;
+    {
+        let tx2 = tx2.clone();
+        let rows = client
+            .query(
+                r#"SELECT aggregate_id, "version", action FROM events WHERE aggregate_type = $1 ORDER BY version"#,
+                &[&T::name()],
+            )
+            .await?;
+
+        for row in rows {
+            let aggregate_id: String = row.get(0);
+            let version: i32 = row.get(1);
+            let action: Json<T::Event> = row.get(2);
+
+            // Create a Commit from the row data
+            let commit = Commit {
+                id: aggregate_id,
+                version: version as usize,
+                diagnostics: None,
+                inner: action.0,
+            };
+
+            // Update max_version_seen if this commit's version is greater
+            match (version, max_version_seen) {
+                (v, Some(max)) if v as usize > max => max_version_seen = Some(v as usize),
+                (v, None) => max_version_seen = Some(v as usize),
+                _ => {}
+            };
+
+            // Send the commit to the channel
+            if tx2.send(commit).is_err() {
+                eprintln!("Stream closed, cannot send event");
+                break;
+            }
+        }
+    }
+    tokio::task::spawn(async move {
+        loop {
+            match rx.next().await {
+                Some(AsyncMessage::Notification(notification)) => {
+                    eprintln!("Received notification: {}", notification.payload());
+                    #[allow(clippy::expect_used)]
+                    let commit: Commit<T::Event> = serde_json::from_str(notification.payload())
+                        .expect("Failed to parse notification payload");
+                    if Some(commit.version) <= max_version_seen {
+                        eprintln!(
+                            "Ignoring commit with version {} as it is not newer than max seen {}",
+                            commit.version,
+                            max_version_seen.unwrap_or(0)
+                        );
+                        continue;
+                    }
+                    if tx2.send(commit).is_err() {
+                        eprintln!("Stream closed, cannot send event");
+                        break;
+                    }
+                }
+                Some(_) => {
+                    eprintln!("Received unexpected message, ignoring");
+                }
+                None => {
+                    eprintln!("No more notifications, stopping listener");
+                    break;
+                }
+            }
+        }
+    });
+
+    // TODO: Return a struct here that owns client as a private field
+    Ok((UnboundedReceiverStream::new(rx2), DeadClient(client)))
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use tokio_postgres::Socket;
+
     use super::*;
     use crate::tests::{Event, State};
 
-    async fn init_event_store()
-    -> std::result::Result<PostgresEventStore<State>, tokio_postgres::Error> {
-        let db_name = "espg_test";
-        let connection_string = format!("postgres://theodorton@localhost:5432/{}", db_name);
+    async fn get_connection_string() -> std::result::Result<String, tokio_postgres::Error> {
+        let thread_id = format!("{:?}", std::thread::current().id())
+            .replace("ThreadId(", "")
+            .replace(")", "");
+        let db_name = format!("espg_test_{}", thread_id);
+
+        let connection_string = "postgres://theodorton@localhost:5432/postgres";
         let (client, connection) =
-            tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
-                .await
-                .expect("Failed to connect to Postgres");
+            tokio_postgres::connect(connection_string, tokio_postgres::NoTls).await?;
+
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 eprintln!("Connection error: {}", e);
             }
         });
 
+        let query = client
+            .batch_execute(format!("CREATE DATABASE {};", db_name).as_str())
+            .await;
+
+        match query {
+            Ok(_) => {}
+            Err(e) => {
+                if e.as_db_error().is_some_and(|db_error| {
+                    db_error.code() == &tokio_postgres::error::SqlState::DUPLICATE_DATABASE
+                }) {
+                    eprintln!("Database {} already exists, using it.", db_name);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+
+        eprintln!("Using database: {}", db_name);
+        let connection_string = format!("postgres://theodorton@localhost:5432/{}", db_name);
+
+        Ok(connection_string)
+    }
+
+    async fn init_conn(
+        spawn_conn: bool,
+    ) -> std::result::Result<
+        (
+            tokio_postgres::Client,
+            Option<tokio_postgres::Connection<Socket, tokio_postgres::tls::NoTlsStream>>,
+        ),
+        tokio_postgres::Error,
+    > {
+        let connection_string = get_connection_string().await?;
+        let (client, connection) =
+            tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
+                .await
+                .expect("Failed to connect to Postgres");
+        let connection = if spawn_conn {
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Connection error: {}", e);
+                }
+            });
+            None
+        } else {
+            Some(connection)
+        };
+        Ok((client, connection))
+    }
+
+    async fn init_event_store(
+        client: Arc<tokio_postgres::Client>,
+    ) -> std::result::Result<PostgresEventStore<State>, tokio_postgres::Error> {
         let event_store = PostgresEventStore::<State>::new(client).await;
         event_store
             .initialize()
@@ -382,13 +555,29 @@ mod tests {
         Ok(event_store)
     }
 
+    async fn init_event_stream() -> std::result::Result<
+        (UnboundedReceiverStream<Commit<Event>>, DeadClient),
+        tokio_postgres::Error,
+    > {
+        if let (client, Some(connection)) = init_conn(false).await? {
+            Ok(
+                super::stream::<State, Socket, tokio_postgres::tls::NoTlsStream>(
+                    client, connection,
+                )
+                .await
+                .expect("Failed to initialize event stream"),
+            )
+        } else {
+            panic!("Failed to initialize Postgres connection");
+        }
+    }
+
     #[tokio::test]
     async fn test_postgres_event_store() -> Result<()> {
-        let mut event_store = init_event_store()
-            .await
-            .expect("msg: Failed to create event store");
-
-        let mut transaction = event_store.begin().await?;
+        let (client, _connection) = init_conn(true).await?;
+        let client = Arc::new(client);
+        let mut event_store = init_event_store(client).await?;
+        let transaction: PostgresEventStoreTransaction<State> = event_store.begin().await?;
 
         transaction.append("test1", Event::Increment(10)).await?;
         transaction.append("test1", Event::Decrement(4)).await?;
@@ -409,7 +598,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_missing_aggregate() -> Result<()> {
-        let event_store = init_event_store()
+        let (client, _connection) = init_conn(true)
+            .await
+            .expect("msg: Failed to connect to Postgres");
+        let client = Arc::new(client);
+        let event_store = init_event_store(client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -426,7 +619,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_commit_conflict() -> Result<()> {
-        let mut event_store = init_event_store()
+        let (client, _connection) = init_conn(true)
+            .await
+            .expect("msg: Failed to connect to Postgres");
+        let client = Arc::new(client);
+        let event_store = init_event_store(client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -440,29 +637,29 @@ mod tests {
 
         // Attempting to commit with a version conflict
         let result = event_store.commit("test2", 1, Event::Decrement(5)).await;
-        assert!(result.is_err(), "Expected version conflict error");
+        assert_eq!(Err(Error::VersionConflict(1)), result);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_rollback() -> Result<()> {
-        let mut event_store = init_event_store()
+        let (client, _connection) = init_conn(true)
             .await
-            .expect("msg: Failed to create event store");
+            .expect("msg: Failed to connect to Postgres");
+        let client = Arc::new(client);
+        let mut event_store = init_event_store(client).await.unwrap();
+        event_store.commit("test3", 1, Event::Increment(10)).await?;
 
-        let mut transaction = event_store.begin().await?;
-        transaction.append("test3", Event::Increment(10)).await?;
-        transaction.complete().await?;
+        let commit = event_store.try_get_commit("test3").await?;
+        assert_eq!(commit.version, 1);
+        assert_eq!(commit.inner.value, 10);
 
-        let mut transaction = event_store.begin().await?;
+        let transaction = event_store.begin().await?;
         transaction.append("test3", Event::Decrement(4)).await?;
         transaction.rollback().await?;
 
-        let commit = event_store
-            .get_commit("test3")
-            .await
-            .expect("Commit not found");
+        let commit = event_store.try_get_commit("test3").await?;
         assert_eq!(commit.version, 1);
         assert_eq!(commit.inner.value, 10);
 
@@ -471,7 +668,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_snapshot() -> Result<()> {
-        let mut event_store = init_event_store()
+        let (client, _connection) = init_conn(true)
+            .await
+            .expect("msg: Failed to connect to Postgres");
+        let client = Arc::new(client);
+        let event_store = init_event_store(client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -508,7 +709,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_inheriting_snapshot_interval() -> Result<()> {
-        let mut event_store = init_event_store()
+        let (client, _connection) = init_conn(true)
+            .await
+            .expect("msg: Failed to connect to Postgres");
+        let client = Arc::new(client);
+        let mut event_store = init_event_store(client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -521,5 +726,178 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming() -> Result<()> {
+        let (client, _connection) = init_conn(true)
+            .await
+            .expect("msg: Failed to connect to Postgres");
+        let client = Arc::new(client);
+        let event_store = init_event_store(client)
+            .await
+            .expect("msg: Failed to create event store");
+        // Implement Stream as a custom struct with `next().await` method
+        // Drop the client when the last event is received
+        let stream = init_event_stream()
+            .await
+            .expect("msg: Failed to create event stream");
+
+        let events_to_send = vec![
+            Event::Increment(10),
+            Event::Decrement(5),
+            Event::Increment(5),
+            Event::Decrement(2),
+        ];
+
+        let events_to_receive = events_to_send.clone();
+        for event in events_to_send {
+            event_store.append("test5", event).await?;
+        }
+
+        let handle = tokio::spawn(async move {
+            let _client = stream.1;
+            let mut stream = stream.0.take(4);
+            let mut n = 0;
+            let mut iter = events_to_receive.iter();
+            while let Some(commit) = stream.next().await {
+                let expected_event = iter.next().expect("Got more events than expected");
+                assert_eq!(
+                    commit.id, "test5",
+                    "Expected event ID to be 'test5' at index {}",
+                    n
+                );
+                assert_eq!(
+                    commit.version,
+                    n + 1,
+                    "Expected version to match at index {}",
+                    n
+                );
+                assert!(
+                    commit.diagnostics.is_none(),
+                    "Expected no diagnostics at index {}",
+                    n
+                );
+                assert_eq!(
+                    commit.inner,
+                    expected_event.clone(),
+                    "Expected event at index {} to match",
+                    n
+                );
+                n += 1;
+            }
+            n
+        });
+
+        let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle);
+        match timeout.await {
+            Ok(Ok(n)) => {
+                assert_eq!(n, 4, "Expected 4 events in the stream");
+            }
+            Ok(Err(e)) => {
+                panic!("Stream failed with error: {}", e);
+            }
+            Err(_) => {
+                panic!("Stream did not complete in time");
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_streaming_after_writes() -> Result<()> {
+        let (client, _connection) = init_conn(true)
+            .await
+            .expect("msg: Failed to connect to Postgres");
+        let client = Arc::new(client);
+        let event_store = init_event_store(client)
+            .await
+            .expect("msg: Failed to create event store");
+
+        let events_to_send = vec![
+            Event::Increment(10),
+            Event::Decrement(5),
+            Event::Increment(5),
+            Event::Decrement(2),
+        ];
+
+        let events_to_receive = events_to_send.clone();
+        for event in events_to_send {
+            event_store.append("test5", event).await?;
+        }
+
+        let stream = init_event_stream()
+            .await
+            .expect("msg: Failed to create event stream");
+        let handle = tokio::spawn(async move {
+            let _client = stream.1;
+            let mut stream = stream.0.take(4);
+            let mut n = 0;
+            let mut iter = events_to_receive.iter();
+            while let Some(commit) = stream.next().await {
+                let expected_event = iter.next().expect("Got more events than expected");
+                assert_eq!(
+                    commit.id, "test5",
+                    "Expected event ID to be 'test5' at index {}",
+                    n
+                );
+                assert_eq!(
+                    commit.version,
+                    n + 1,
+                    "Expected version to match at index {}",
+                    n
+                );
+                assert!(
+                    commit.diagnostics.is_none(),
+                    "Expected no diagnostics at index {}",
+                    n
+                );
+                assert_eq!(
+                    commit.inner,
+                    expected_event.clone(),
+                    "Expected event at index {} to match",
+                    n
+                );
+                n += 1;
+            }
+            n
+        });
+
+        let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle);
+        match timeout.await {
+            Ok(Ok(n)) => {
+                assert_eq!(n, 4, "Expected 4 events in the stream");
+            }
+            Ok(Err(e)) => {
+                panic!("Stream failed with error: {}", e);
+            }
+            Err(_) => {
+                panic!("Stream did not complete in time");
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Client must be unique to begin a transaction")]
+    async fn test_panic_on_multiple_transactions() {
+        let (client, _connection) = init_conn(true)
+            .await
+            .expect("msg: Failed to connect to Postgres");
+        let client = Arc::new(client);
+        let mut event_store_a = init_event_store(client.clone())
+            .await
+            .expect("msg: Failed to create event store a");
+        let mut event_store_b = init_event_store(client)
+            .await
+            .expect("msg: Failed to create event store b");
+
+        let _ = event_store_a
+            .begin()
+            .await
+            .expect("Failed to begin transaction A");
+        let _ = event_store_b.begin().await;
     }
 }

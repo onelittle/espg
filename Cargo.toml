@@ -4,17 +4,36 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-indexmap = { version = "2.9.0", features = ["serde"] }
+futures = "0.3.31"
+futures-channel = "0.3.31"
+futures-util = "0.3.31"
+indexmap = { version = "2.9.0", features = ["serde"], optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+serde_json = { version = "1.0.140", optional = true }
 thiserror = "2.0.12"
-tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
-tokio-postgres = { version = "0.7.13", features = ["with-serde_json-1"] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "io-std"] }
+tokio-postgres = { version = "0.7.13", features = ["with-serde_json-1"], optional = true}
 tokio-stream = { version = "0.1.17", features = ["sync"] }
+tokio-util = "0.7.15"
+uuid = { version = "1.17.0", features = ["v4"] }
+
 
 [features]
-tokio = []
+postgres = ["dep:tokio-postgres", "dep:serde_json"]
+inmem = ["dep:indexmap"]
 
 [lints.clippy]
 expect_used = "warn"
 unwrap_used = "warn"
+
+[[example]]
+name = "benchmark"
+required-features = ["inmem"]
+
+[[example]]
+name = "bank_account_pg"
+required-features = ["postgres"]
+
+[[example]]
+name = "bank_account"
+required-features = ["inmem"]

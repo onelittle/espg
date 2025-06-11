@@ -2,9 +2,47 @@ mod aggregate;
 mod event_stores;
 
 pub use aggregate::Aggregate;
+#[cfg(feature = "inmem")]
 pub use event_stores::InMemoryEventStore;
+#[cfg(feature = "postgres")]
 pub use event_stores::PostgresEventStore;
-pub use event_stores::{Error, EventStore, Result, StreamingEventStore};
+#[cfg(feature = "postgres")]
+pub use event_stores::postgres::DeadClient;
+pub use event_stores::{Commit, Error, EventStore, Result};
+
+#[cfg(feature = "postgres")]
+pub use event_stores::postgres::stream as postgres_stream;
+
+#[allow(async_fn_in_trait)]
+pub trait Commands<'a, E: EventStore<T> + 'a, T: Aggregate + Default> {
+    fn new(event_store: &'a E) -> Self;
+    fn event_store(&'a self) -> &'a E;
+
+    async fn commit(&'a self, id: &str, version: usize, event: T::Event) -> Result<()> {
+        self.event_store().commit(id, version, event).await
+    }
+
+    async fn append(&'a self, id: &str, event: T::Event) -> Result<()> {
+        self.event_store().append(id, event).await
+    }
+
+    async fn retry_on_version_conflict<'b, F, Fut>(&'a self, mut f: F) -> Result<()>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<()>> + 'b,
+        'a: 'b,
+    {
+        loop {
+            match f().await {
+                Ok(_) => return Ok(()),
+                Err(Error::VersionConflict(_)) => {
+                    eprintln!("Version conflict occurred, retrying...");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -17,7 +55,7 @@ mod tests {
         pub value: i32,
     }
 
-    #[derive(Clone, Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
     pub enum Event {
         Increment(i32),
         Decrement(i32),

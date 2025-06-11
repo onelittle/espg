@@ -1,4 +1,4 @@
-pub trait Aggregate: Default {
+pub trait Aggregate {
     type Event;
 
     // TODO: make this a const fn when stable
@@ -6,7 +6,10 @@ pub trait Aggregate: Default {
         std::any::type_name::<Self>()
     }
     fn reduce(self, event: &Self::Event) -> Self;
-    fn from_slice(events: &[Self::Event]) -> Self {
+    fn from_slice(events: &[Self::Event]) -> Self
+    where
+        Self: Default,
+    {
         events
             .iter()
             .fold(Self::default(), |state, event| state.reduce(event))
