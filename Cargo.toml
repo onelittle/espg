@@ -23,7 +23,7 @@ deadpool-postgres = "0.14.1"
 
 [features]
 postgres = ["dep:tokio-postgres", "dep:serde_json"]
-deadpool = ["dep:deadpool-postgres"]
+deadpool = ["dep:deadpool-postgres", "postgres"]
 inmem = ["dep:indexmap"]
 streaming = []
 
