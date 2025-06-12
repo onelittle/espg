@@ -25,6 +25,7 @@ deadpool-postgres = "0.14.1"
 postgres = ["dep:tokio-postgres", "dep:serde_json"]
 deadpool = ["dep:deadpool-postgres"]
 inmem = ["dep:indexmap"]
+streaming = []
 
 [lints.clippy]
 expect_used = "warn"
@@ -36,7 +37,7 @@ required-features = ["inmem"]
 
 [[example]]
 name = "bank_account_pg"
-required-features = ["postgres"]
+required-features = ["postgres", "streaming"]
 
 [[example]]
 name = "bank_account"

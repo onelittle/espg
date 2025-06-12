@@ -9,8 +9,10 @@ pub use event_stores::PostgresEventStore;
 pub use event_stores::{Commit, Error, EventStore, Result};
 
 #[cfg(feature = "postgres")]
+#[cfg(feature = "streaming")]
 pub use event_stores::postgres::stream as postgres_stream;
 
+#[cfg(feature = "streaming")]
 pub use event_stores::EventStream;
 
 #[allow(async_fn_in_trait)]

@@ -1,15 +1,14 @@
-use super::{Error, EventStream, Result};
+use super::{Error, Result};
+#[cfg(feature = "streaming")]
+use crate::EventStream;
 use crate::{
     Aggregate, EventStore,
     event_stores::{Commit, Diagnostics},
 };
-use futures::{FutureExt, TryStreamExt};
-use futures::{StreamExt, stream};
 use futures_channel::mpsc;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_postgres::{AsyncMessage, GenericClient, types::Json};
+use tokio_postgres::{GenericClient, types::Json};
 
 pub struct PostgresEventStore<'a, T, Db: GenericClient> {
     client: &'a Db,
@@ -277,12 +276,14 @@ where
         Ok(())
     }
 
+    #[cfg(feature = "streaming")]
     #[allow(unused)]
     async fn stream(&self) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
         let (_tx, rx) = mpsc::unbounded::<Commit<T::Event>>();
         todo!("Implement client handling for stream_for");
     }
 
+    #[cfg(feature = "streaming")]
     #[allow(unused)]
     async fn stream_for(&self, _id: &str) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
         let (_tx, rx) = mpsc::unbounded::<Commit<T::Event>>();
@@ -290,106 +291,123 @@ where
     }
 }
 
-pub async fn stream<T, U, V>(
-    client: tokio_postgres::Client,
-    mut connection: tokio_postgres::Connection<U, V>,
-) -> Result<
-    EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<T::Event>>, tokio_postgres::Client>,
->
-where
-    T: Aggregate,
-    T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
-    U: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    V: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let (tx, mut rx) = mpsc::unbounded();
-    let stream =
-        stream::poll_fn(move |cx| connection.poll_message(cx)).map_err(|e| panic!("{}", e));
-    #[allow(clippy::unwrap_used)]
-    let connection = stream.forward(tx).map(|r| r.unwrap());
-    tokio::spawn(connection);
+#[cfg(feature = "streaming")]
+mod streaming {
+    use futures::{FutureExt, TryStreamExt};
+    use futures::{StreamExt, stream};
+    use futures_channel::mpsc;
+    use serde::{Serialize, de::DeserializeOwned};
+    use tokio::io::{AsyncRead, AsyncWrite};
+    use tokio_postgres::{AsyncMessage, types::Json};
 
-    #[allow(clippy::expect_used)]
-    client.batch_execute("LISTEN event_notifications;").await?;
+    use crate::{Aggregate, Commit, EventStream, Result};
 
-    let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel::<Commit<T::Event>>();
-    let mut max_version_seen = None;
+    pub async fn stream<T, U, V>(
+        client: tokio_postgres::Client,
+        mut connection: tokio_postgres::Connection<U, V>,
+    ) -> Result<
+        EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<T::Event>>, tokio_postgres::Client>,
+    >
+    where
+        T: Aggregate,
+        T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
+        U: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        V: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let tx2 = tx2.clone();
-        let rows = client
+        let (tx, mut rx) = mpsc::unbounded();
+        let stream =
+            stream::poll_fn(move |cx| connection.poll_message(cx)).map_err(|e| panic!("{}", e));
+        #[allow(clippy::unwrap_used)]
+        let connection = stream.forward(tx).map(|r| r.unwrap());
+        tokio::spawn(connection);
+
+        #[allow(clippy::expect_used)]
+        client.batch_execute("LISTEN event_notifications;").await?;
+
+        let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel::<Commit<T::Event>>();
+        let mut max_version_seen = None;
+        {
+            let tx2 = tx2.clone();
+            let rows = client
             .query(
                 r#"SELECT aggregate_id, "version", action FROM events WHERE aggregate_type = $1 ORDER BY version"#,
                 &[&T::name()],
             )
             .await?;
 
-        for row in rows {
-            let aggregate_id: String = row.get(0);
-            let version: i32 = row.get(1);
-            let action: Json<T::Event> = row.get(2);
+            for row in rows {
+                let aggregate_id: String = row.get(0);
+                let version: i32 = row.get(1);
+                let action: Json<T::Event> = row.get(2);
 
-            // Create a Commit from the row data
-            let commit = Commit {
-                id: aggregate_id,
-                version: version as usize,
-                diagnostics: None,
-                inner: action.0,
-            };
+                // Create a Commit from the row data
+                let commit = Commit {
+                    id: aggregate_id,
+                    version: version as usize,
+                    diagnostics: None,
+                    inner: action.0,
+                };
 
-            // Update max_version_seen if this commit's version is greater
-            match (version, max_version_seen) {
-                (v, Some(max)) if v as usize > max => max_version_seen = Some(v as usize),
-                (v, None) => max_version_seen = Some(v as usize),
-                _ => {}
-            };
+                // Update max_version_seen if this commit's version is greater
+                match (version, max_version_seen) {
+                    (v, Some(max)) if v as usize > max => max_version_seen = Some(v as usize),
+                    (v, None) => max_version_seen = Some(v as usize),
+                    _ => {}
+                };
 
-            // Send the commit to the channel
-            if tx2.send(commit).is_err() {
-                eprintln!("Stream closed, cannot send event");
-                break;
-            }
-        }
-    }
-    tokio::task::spawn(async move {
-        loop {
-            match rx.next().await {
-                Some(AsyncMessage::Notification(notification)) => {
-                    eprintln!("Received notification: {}", notification.payload());
-                    #[allow(clippy::expect_used)]
-                    let commit: Commit<T::Event> = serde_json::from_str(notification.payload())
-                        .expect("Failed to parse notification payload");
-                    if Some(commit.version) <= max_version_seen {
-                        eprintln!(
-                            "Ignoring commit with version {} as it is not newer than max seen {}",
-                            commit.version,
-                            max_version_seen.unwrap_or(0)
-                        );
-                        continue;
-                    }
-                    if tx2.send(commit).is_err() {
-                        eprintln!("Stream closed, cannot send event");
-                        break;
-                    }
-                }
-                Some(_) => {
-                    eprintln!("Received unexpected message, ignoring");
-                }
-                None => {
-                    eprintln!("No more notifications, stopping listener");
+                // Send the commit to the channel
+                if tx2.send(commit).is_err() {
+                    eprintln!("Stream closed, cannot send event");
                     break;
                 }
             }
         }
-    });
+        tokio::task::spawn(async move {
+            loop {
+                match rx.next().await {
+                    Some(AsyncMessage::Notification(notification)) => {
+                        eprintln!("Received notification: {}", notification.payload());
+                        #[allow(clippy::expect_used)]
+                        let commit: Commit<T::Event> = serde_json::from_str(notification.payload())
+                            .expect("Failed to parse notification payload");
+                        if Some(commit.version) <= max_version_seen {
+                            eprintln!(
+                                "Ignoring commit with version {} as it is not newer than max seen {}",
+                                commit.version,
+                                max_version_seen.unwrap_or(0)
+                            );
+                            continue;
+                        }
+                        if tx2.send(commit).is_err() {
+                            eprintln!("Stream closed, cannot send event");
+                            break;
+                        }
+                    }
+                    Some(_) => {
+                        eprintln!("Received unexpected message, ignoring");
+                    }
+                    None => {
+                        eprintln!("No more notifications, stopping listener");
+                        break;
+                    }
+                }
+            }
+        });
 
-    Ok(EventStream::new(rx2, client))
+        Ok(EventStream::new(rx2, client))
+    }
 }
+
+#[cfg(feature = "streaming")]
+pub use streaming::stream;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use tokio_postgres::{Socket, Transaction};
+    #[cfg(feature = "streaming")]
+    use tokio_stream::StreamExt;
 
     use super::*;
     use crate::tests::{Event, State};
@@ -481,6 +499,7 @@ mod tests {
         Ok(event_store)
     }
 
+    #[cfg(feature = "streaming")]
     async fn init_event_stream() -> std::result::Result<
         EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<Event>>, tokio_postgres::Client>,
         tokio_postgres::Error,
@@ -634,6 +653,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "streaming")]
     async fn test_streaming() -> Result<()> {
         let (client, _connection) = init_conn(true)
             .await
@@ -710,6 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "streaming")]
     async fn test_streaming_after_writes() -> Result<()> {
         let (client, _connection) = init_conn(true)
             .await

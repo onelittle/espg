@@ -6,7 +6,9 @@ use indexmap::IndexMap;
 use tokio::sync::broadcast::{Receiver, error::SendError};
 
 use super::{Commit, Error, EventStore, Result};
-use crate::{Aggregate, EventStream};
+use crate::Aggregate;
+#[cfg(feature = "streaming")]
+use crate::EventStream;
 
 type CommitTuple<T> = (usize, Vec<T>);
 
@@ -141,10 +143,12 @@ where
         Ok(())
     }
 
+    #[cfg(feature = "streaming")]
     async fn stream(&self) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
         EventStream::new(self.broadcast.subscribe(), ())
     }
 
+    #[cfg(feature = "streaming")]
     async fn stream_for(&self, _id: &str) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
         EventStream::new(self.broadcast.subscribe(), ())
     }
