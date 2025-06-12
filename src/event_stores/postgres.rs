@@ -1,6 +1,6 @@
 use std::{convert::Infallible, sync::Arc};
 
-use super::{Error, Result};
+use super::{Error, EventStream, Result};
 use crate::{
     Aggregate, EventStore,
     event_stores::{Commit, Diagnostics},
@@ -9,13 +9,9 @@ use futures::{FutureExt, TryStreamExt};
 use futures::{StreamExt, stream};
 use futures_channel::mpsc;
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_postgres::{
-    AsyncMessage, GenericClient, Row,
-    types::{FromSql, Json},
-};
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_postgres::{AsyncMessage, GenericClient, types::Json};
 
 pub struct PostgresEventStore<T> {
     client: Arc<tokio_postgres::Client>,
@@ -365,14 +361,10 @@ where
     }
 }
 
-// Utility struct to handle inaccessible clients
-#[allow(dead_code)]
-pub struct DeadClient(tokio_postgres::Client);
-
 pub async fn stream<T, U, V>(
     client: tokio_postgres::Client,
     mut connection: tokio_postgres::Connection<U, V>,
-) -> Result<(UnboundedReceiverStream<Commit<T::Event>>, DeadClient)>
+) -> Result<EventStream<Commit<T::Event>, tokio_postgres::Client>>
 where
     T: Aggregate,
     T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
@@ -460,7 +452,7 @@ where
     });
 
     // TODO: Return a struct here that owns client as a private field
-    Ok((UnboundedReceiverStream::new(rx2), DeadClient(client)))
+    Ok(EventStream::new(rx2, client))
 }
 
 #[cfg(test)]
@@ -556,7 +548,7 @@ mod tests {
     }
 
     async fn init_event_stream() -> std::result::Result<
-        (UnboundedReceiverStream<Commit<Event>>, DeadClient),
+        EventStream<Commit<Event>, tokio_postgres::Client>,
         tokio_postgres::Error,
     > {
         if let (client, Some(connection)) = init_conn(false).await? {
@@ -756,8 +748,7 @@ mod tests {
         }
 
         let handle = tokio::spawn(async move {
-            let _client = stream.1;
-            let mut stream = stream.0.take(4);
+            let mut stream = stream.take(4);
             let mut n = 0;
             let mut iter = events_to_receive.iter();
             while let Some(commit) = stream.next().await {
@@ -831,8 +822,7 @@ mod tests {
             .await
             .expect("msg: Failed to create event stream");
         let handle = tokio::spawn(async move {
-            let _client = stream.1;
-            let mut stream = stream.0.take(4);
+            let mut stream = stream.take(4);
             let mut n = 0;
             let mut iter = events_to_receive.iter();
             while let Some(commit) = stream.next().await {

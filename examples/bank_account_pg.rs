@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use espg::{Aggregate, Commands as _, Commit, DeadClient, EventStore, PostgresEventStore};
+use espg::{Aggregate, Commands as _, Commit, EventStore, EventStream, PostgresEventStore};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::{NoTls, Socket, tls::NoTlsStream};
-use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
+use tokio_stream::StreamExt;
 
 #[derive(Default, Serialize, Deserialize)]
 struct AccountState {
@@ -95,7 +95,7 @@ impl<'a> Commands<'a> {
 }
 
 #[allow(clippy::expect_used)]
-async fn init_event_stream() -> (UnboundedReceiverStream<Commit<Event>>, DeadClient) {
+async fn init_event_stream() -> EventStream<Commit<Event>, tokio_postgres::Client> {
     let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
     let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
         .await
@@ -125,7 +125,7 @@ async fn main() -> espg::Result<()> {
     event_store.initialize().await?;
     event_store.clear().await?;
 
-    let (stream, _stream_client) = init_event_stream().await;
+    let stream = init_event_stream().await;
 
     let event_store: PostgresEventStore<AccountState> =
         PostgresEventStore::new(client.clone()).await;

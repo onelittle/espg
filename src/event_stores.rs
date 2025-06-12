@@ -3,7 +3,11 @@ mod in_memory;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
-use std::fmt::Display;
+use std::{
+    fmt::Display,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use crate::Aggregate;
 #[cfg(feature = "inmem")]
@@ -11,6 +15,7 @@ pub use in_memory::InMemoryEventStore;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresEventStore;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_stream::{Stream, wrappers::UnboundedReceiverStream};
 
 #[derive(Debug, thiserror::Error)]
@@ -126,5 +131,54 @@ where
     ) -> impl Stream<Item = std::result::Result<Commit<T::Event>, Self::StreamError>> {
         // TODO: Implement filtering by id
         self.stream().await
+    }
+}
+
+#[derive(Debug)]
+pub struct EventStream<T, X> {
+    inner: UnboundedReceiver<T>,
+    _client: X,
+}
+
+impl<T, X> EventStream<T, X> {
+    /// Create a new `UnboundedReceiverStream`.
+    pub fn new(recv: UnboundedReceiver<T>, client: X) -> Self {
+        Self {
+            inner: recv,
+            _client: client,
+        }
+    }
+
+    /// Get back the inner `UnboundedReceiver`.
+    pub fn into_inner(self) -> UnboundedReceiver<T> {
+        self.inner
+    }
+
+    /// Closes the receiving half of a channel without dropping it.
+    ///
+    /// This prevents any further messages from being sent on the channel while
+    /// still enabling the receiver to drain messages that are buffered.
+    pub fn close(&mut self) {
+        self.inner.close();
+    }
+}
+
+impl<T, X: Unpin> Stream for EventStream<T, X> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.poll_recv(cx)
+    }
+}
+
+impl<T, X> AsRef<UnboundedReceiver<T>> for EventStream<T, X> {
+    fn as_ref(&self) -> &UnboundedReceiver<T> {
+        &self.inner
+    }
+}
+
+impl<T, X> AsMut<UnboundedReceiver<T>> for EventStream<T, X> {
+    fn as_mut(&mut self) -> &mut UnboundedReceiver<T> {
+        &mut self.inner
     }
 }

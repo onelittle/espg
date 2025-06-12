@@ -6,12 +6,12 @@ pub use aggregate::Aggregate;
 pub use event_stores::InMemoryEventStore;
 #[cfg(feature = "postgres")]
 pub use event_stores::PostgresEventStore;
-#[cfg(feature = "postgres")]
-pub use event_stores::postgres::DeadClient;
 pub use event_stores::{Commit, Error, EventStore, Result};
 
 #[cfg(feature = "postgres")]
 pub use event_stores::postgres::stream as postgres_stream;
+
+pub use event_stores::EventStream;
 
 #[allow(async_fn_in_trait)]
 pub trait Commands<'a, E: EventStore<T> + 'a, T: Aggregate + Default> {
