@@ -6,8 +6,8 @@ pub mod postgres;
 pub(crate) mod sql_helpers;
 
 use std::{
-    fmt::Display,
     pin::Pin,
+    sync::mpsc::Receiver,
     task::{Context, Poll},
 };
 
@@ -18,7 +18,7 @@ pub use in_memory::InMemoryEventStore;
 pub use postgres::PostgresEventStore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio_stream::{Stream, wrappers::UnboundedReceiverStream};
+use tokio_stream::Stream;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -69,8 +69,8 @@ pub trait EventStore<T>
 where
     T: Aggregate + Default,
 {
-    type StoreError;
-    type StreamError: Display + std::error::Error + Send + Sync;
+    type StreamReceiver;
+    type StreamClient;
 
     async fn append(&self, id: &str, event: T::Event) -> Result<()>;
     async fn commit(&self, id: &str, version: usize, event: T::Event) -> Result<()>;
@@ -120,31 +120,19 @@ where
 
     async fn transmit(&self, id: &str, event: Commit<T::Event>) -> Result<()>;
     /// Consumes the event store and returns a stream of events.
-    async fn stream(
-        &self,
-    ) -> impl Stream<Item = std::result::Result<Commit<T::Event>, Self::StreamError>> {
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        UnboundedReceiverStream::new(rx)
-            as UnboundedReceiverStream<std::result::Result<Commit<T::Event>, Self::StreamError>>
-    }
-    async fn stream_for<E>(
-        &self,
-        _id: &str,
-    ) -> impl Stream<Item = std::result::Result<Commit<T::Event>, Self::StreamError>> {
-        // TODO: Implement filtering by id
-        self.stream().await
-    }
+    async fn stream(&self) -> EventStream<Self::StreamReceiver, Self::StreamClient>;
+    async fn stream_for(&self, _id: &str) -> EventStream<Self::StreamReceiver, Self::StreamClient>;
 }
 
 #[derive(Debug)]
-pub struct EventStream<T, X> {
-    inner: UnboundedReceiver<T>,
+pub struct EventStream<R, X> {
+    inner: R,
     _client: X,
 }
 
-impl<T, X> EventStream<T, X> {
+impl<R, X> EventStream<R, X> {
     /// Create a new `UnboundedReceiverStream`.
-    pub fn new(recv: UnboundedReceiver<T>, client: X) -> Self {
+    pub fn new(recv: R, client: X) -> Self {
         Self {
             inner: recv,
             _client: client,
@@ -152,10 +140,22 @@ impl<T, X> EventStream<T, X> {
     }
 
     /// Get back the inner `UnboundedReceiver`.
-    pub fn into_inner(self) -> UnboundedReceiver<T> {
+    pub fn into_inner(self) -> R {
         self.inner
     }
+}
 
+impl<T, X> EventStream<Receiver<T>, X> {
+    /// Closes the receiving half of a channel without dropping it.
+    ///
+    /// This prevents any further messages from being sent on the channel while
+    /// still enabling the receiver to drain messages that are buffered.
+    pub fn close(&mut self) {
+        // Note: This is a no-op for `std::sync::mpsc::Receiver` since it does not have a close method.
+    }
+}
+
+impl<T, X> EventStream<UnboundedReceiver<T>, X> {
     /// Closes the receiving half of a channel without dropping it.
     ///
     /// This prevents any further messages from being sent on the channel while
@@ -165,7 +165,7 @@ impl<T, X> EventStream<T, X> {
     }
 }
 
-impl<T, X: Unpin> Stream for EventStream<T, X> {
+impl<T, X: Unpin> Stream for EventStream<UnboundedReceiver<T>, X> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -173,13 +173,13 @@ impl<T, X: Unpin> Stream for EventStream<T, X> {
     }
 }
 
-impl<T, X> AsRef<UnboundedReceiver<T>> for EventStream<T, X> {
+impl<T, X> AsRef<UnboundedReceiver<T>> for EventStream<UnboundedReceiver<T>, X> {
     fn as_ref(&self) -> &UnboundedReceiver<T> {
         &self.inner
     }
 }
 
-impl<T, X> AsMut<UnboundedReceiver<T>> for EventStream<T, X> {
+impl<T, X> AsMut<UnboundedReceiver<T>> for EventStream<UnboundedReceiver<T>, X> {
     fn as_mut(&mut self) -> &mut UnboundedReceiver<T> {
         &mut self.inner
     }

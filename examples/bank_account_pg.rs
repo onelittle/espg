@@ -96,7 +96,8 @@ impl<'a> Commands<'a> {
 }
 
 #[allow(clippy::expect_used)]
-async fn init_event_stream() -> EventStream<Commit<Event>, tokio_postgres::Client> {
+async fn init_event_stream()
+-> EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<Event>>, tokio_postgres::Client> {
     let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
     let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
         .await
@@ -125,7 +126,7 @@ async fn main() -> espg::Result<()> {
 
     let stream = init_event_stream().await;
 
-    let event_store: PostgresEventStore<'_, AccountState, tokio_postgres::Client> =
+    let event_store: PostgresEventStore<AccountState, tokio_postgres::Client> =
         PostgresEventStore::new(&client);
     let commands = Commands::new(&event_store);
     let id = commands.open_account().await?;

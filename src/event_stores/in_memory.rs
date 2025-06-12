@@ -1,14 +1,12 @@
-use std::convert::Infallible;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 
 use indexmap::IndexMap;
-use tokio::sync::broadcast::error::SendError;
-use tokio_stream::{Stream, wrappers::BroadcastStream};
+use tokio::sync::broadcast::{Receiver, error::SendError};
 
 use super::{Commit, Error, EventStore, Result};
-use crate::Aggregate;
+use crate::{Aggregate, EventStream};
 
 type CommitTuple<T> = (usize, Vec<T>);
 
@@ -64,8 +62,8 @@ where
     T: Aggregate + Default,
     T::Event: Clone + Send + 'static,
 {
-    type StoreError = Infallible;
-    type StreamError = tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+    type StreamReceiver = Receiver<Commit<T::Event>>;
+    type StreamClient = ();
 
     async fn append(&self, id: &str, action: T::Event) -> Result<()> {
         let version = {
@@ -143,15 +141,12 @@ where
         Ok(())
     }
 
-    async fn stream(
-        &self,
-    ) -> impl Stream<
-        Item = std::result::Result<
-            Commit<T::Event>,
-            tokio_stream::wrappers::errors::BroadcastStreamRecvError,
-        >,
-    > {
-        BroadcastStream::new(self.broadcast.subscribe()) as BroadcastStream<Commit<T::Event>>
+    async fn stream(&self) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
+        EventStream::new(self.broadcast.subscribe(), ())
+    }
+
+    async fn stream_for(&self, _id: &str) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
+        EventStream::new(self.broadcast.subscribe(), ())
     }
 }
 

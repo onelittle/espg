@@ -1,5 +1,3 @@
-use std::convert::Infallible;
-
 use super::{Error, EventStream, Result};
 use crate::{
     Aggregate, EventStore,
@@ -80,8 +78,8 @@ where
     T: Aggregate + Default + Serialize + DeserializeOwned,
     T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
 {
-    type StoreError = tokio_postgres::Error;
-    type StreamError = Infallible;
+    type StreamReceiver = mpsc::UnboundedReceiver<Commit<T::Event>>;
+    type StreamClient = tokio_postgres::Client;
 
     async fn try_get_events_since(
         &self,
@@ -278,12 +276,26 @@ where
 
         Ok(())
     }
+
+    #[allow(unused)]
+    async fn stream(&self) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
+        let (_tx, rx) = mpsc::unbounded::<Commit<T::Event>>();
+        todo!("Implement client handling for stream_for");
+    }
+
+    #[allow(unused)]
+    async fn stream_for(&self, _id: &str) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
+        let (_tx, rx) = mpsc::unbounded::<Commit<T::Event>>();
+        todo!("Implement client handling for stream_for");
+    }
 }
 
 pub async fn stream<T, U, V>(
     client: tokio_postgres::Client,
     mut connection: tokio_postgres::Connection<U, V>,
-) -> Result<EventStream<Commit<T::Event>, tokio_postgres::Client>>
+) -> Result<
+    EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<T::Event>>, tokio_postgres::Client>,
+>
 where
     T: Aggregate,
     T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
@@ -370,7 +382,6 @@ where
         }
     });
 
-    // TODO: Return a struct here that owns client as a private field
     Ok(EventStream::new(rx2, client))
 }
 
@@ -471,7 +482,7 @@ mod tests {
     }
 
     async fn init_event_stream() -> std::result::Result<
-        EventStream<Commit<Event>, tokio_postgres::Client>,
+        EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<Event>>, tokio_postgres::Client>,
         tokio_postgres::Error,
     > {
         if let (client, Some(connection)) = init_conn(false).await? {

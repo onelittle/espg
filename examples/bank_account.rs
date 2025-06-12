@@ -1,5 +1,4 @@
 use espg::{Aggregate, EventStore, InMemoryEventStore};
-use tokio_stream::StreamExt;
 
 #[derive(Default)]
 struct AccountState {
@@ -42,6 +41,7 @@ impl Aggregate for AccountState {
     }
 }
 
+#[allow(dead_code)]
 fn update_stats_display(active_accounts: usize, total_balance: i64) {
     println!(
         "Active accounts: {} | Total balance: {}",
@@ -49,12 +49,12 @@ fn update_stats_display(active_accounts: usize, total_balance: i64) {
     );
 }
 
-struct Commands<'a> {
-    event_store: &'a mut InMemoryEventStore<AccountState>,
+struct Commands<'a, E: EventStore<AccountState>> {
+    event_store: &'a E,
 }
 
-impl<'a> Commands<'a> {
-    fn new(event_store: &'a mut InMemoryEventStore<AccountState>) -> Self {
+impl<'a, E: EventStore<AccountState>> Commands<'a, E> {
+    fn new(event_store: &'a E) -> Self {
         Commands { event_store }
     }
 
@@ -82,44 +82,44 @@ impl<'a> Commands<'a> {
 #[tokio::main]
 async fn main() -> espg::Result<()> {
     let event_store: InMemoryEventStore<AccountState> = InMemoryEventStore::default();
-    let mut active_accounts = 0;
-    let mut total_balance = 0;
+    let mut _active_accounts = 0;
+    let mut _total_balance = 0;
 
     let stream_handler = {
-        let event_store = event_store.clone();
+        let _event_store = event_store.clone();
         tokio::spawn(async move {
-            let mut stream = event_store.stream().await;
-            while let Some(Ok(commit)) = stream.next().await {
-                let event = commit.inner;
-                match event {
-                    Event::AccountOpened => {
-                        active_accounts += 1;
-                        total_balance += 0; // New account starts with zero balance
-                    }
-                    Event::MoneyDeposited(amount) => {
-                        total_balance += amount;
-                    }
-                    Event::MoneyWithdrawn(amount) => {
-                        total_balance -= amount;
-                    }
-                    Event::AccountClosed => {
-                        active_accounts -= 1;
-                    }
-                }
+            // let mut stream = event_store.stream().await;
+            // while let Some(Ok(commit)) = stream.next().await {
+            //     let event = commit.inner;
+            //     match event {
+            //         Event::AccountOpened => {
+            //             active_accounts += 1;
+            //             total_balance += 0; // New account starts with zero balance
+            //         }
+            //         Event::MoneyDeposited(amount) => {
+            //             total_balance += amount;
+            //         }
+            //         Event::MoneyWithdrawn(amount) => {
+            //             total_balance -= amount;
+            //         }
+            //         Event::AccountClosed => {
+            //             active_accounts -= 1;
+            //         }
+            //     }
 
-                update_stats_display(active_accounts, total_balance);
-            }
+            //     update_stats_display(active_accounts, total_balance);
+            // }
         })
     };
 
     let thread_a = {
-        let mut event_store = event_store.clone();
+        let event_store = event_store.clone();
         tokio::spawn(async move {
-            let mut commands = Commands::new(&mut event_store);
+            let mut commands = Commands::new(&event_store);
             commands.open_account("account1").await?;
             commands.deposit_money("account1", 100).await?;
             commands.withdraw_money("account1", 50).await?;
-            commands.open_account("account2").await?;
+            commands.open_account("account1").await?;
             commands.deposit_money("account2", 200).await?;
             commands.close_account("account2").await?;
 
@@ -128,9 +128,9 @@ async fn main() -> espg::Result<()> {
     };
 
     let thread_b = {
-        let mut event_store = event_store.clone();
+        let event_store = event_store.clone();
         tokio::spawn(async move {
-            let mut commands = Commands::new(&mut event_store);
+            let mut commands = Commands::new(&event_store);
             commands.deposit_money("account1", 100).await?;
             commands.withdraw_money("account1", 50).await?;
 
