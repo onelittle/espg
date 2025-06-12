@@ -1,5 +1,5 @@
 mod aggregate;
-mod event_stores;
+pub mod event_stores;
 
 pub use aggregate::Aggregate;
 #[cfg(feature = "inmem")]

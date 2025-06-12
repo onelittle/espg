@@ -31,31 +31,35 @@ where
             snapshot_interval: 10,
         }
     }
+}
 
-    pub async fn initialize(&self) -> std::result::Result<(), tokio_postgres::Error> {
-        // Create the necessary tables if they do not exist
-        self.client
-            .batch_execute(super::sql_helpers::CREATE_EVENTS)
-            .await?;
+pub async fn initialize(
+    client: &tokio_postgres::Client,
+) -> std::result::Result<(), tokio_postgres::Error> {
+    // Create the necessary tables if they do not exist
+    client
+        .batch_execute(super::sql_helpers::CREATE_EVENTS)
+        .await?;
 
-        self.client
-            .batch_execute(super::sql_helpers::CREATE_SNAPSHOTS)
-            .await?;
+    client
+        .batch_execute(super::sql_helpers::CREATE_SNAPSHOTS)
+        .await?;
 
-        Ok(())
-    }
+    Ok(())
+}
 
-    pub async fn clear(&self) -> std::result::Result<(), tokio_postgres::Error> {
-        self.client
-            .batch_execute(
-                r#"
-                DELETE FROM events;
-                DELETE FROM snapshots;
-            "#,
-            )
-            .await?;
-        Ok(())
-    }
+pub async fn clear(
+    client: &tokio_postgres::Client,
+) -> std::result::Result<(), tokio_postgres::Error> {
+    client
+        .batch_execute(
+            r#"
+            DELETE FROM events;
+            DELETE FROM snapshots;
+        "#,
+        )
+        .await?;
+    Ok(())
 }
 
 impl<T, Db: GenericClient> EventStore<T> for PostgresEventStore<'_, T, Db>
@@ -442,13 +446,11 @@ mod tests {
         'a: 'b,
     {
         let event_store = PostgresEventStore::new(client);
-        event_store
-            .initialize()
+        super::initialize(client)
             .await
             .expect("Failed to initialize event store");
 
-        event_store
-            .clear()
+        super::clear(client)
             .await
             .expect("Failed to clear event store");
 

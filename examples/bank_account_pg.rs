@@ -120,10 +120,8 @@ async fn main() -> espg::Result<()> {
 
     let mut active_accounts = 0;
     let mut total_balance = 0;
-    let event_store: PostgresEventStore<AccountState, tokio_postgres::Client> =
-        PostgresEventStore::new(&client);
-    event_store.initialize().await?;
-    event_store.clear().await?;
+    espg::event_stores::postgres::initialize(&client).await?;
+    espg::event_stores::postgres::clear(&client).await?;
 
     let stream = init_event_stream().await;
 
