@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use espg::{Aggregate, Commands as _, Commit, EventStore, EventStream, PostgresEventStore};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::{NoTls, Socket, tls::NoTlsStream};
@@ -54,15 +52,18 @@ fn update_stats_display(active_accounts: usize, total_balance: i64) {
 }
 
 struct Commands<'a> {
-    event_store: &'a PostgresEventStore<AccountState>,
+    event_store: &'a PostgresEventStore<'a, AccountState, tokio_postgres::Client>,
 }
 
-impl<'a> espg::Commands<'a, PostgresEventStore<AccountState>, AccountState> for Commands<'a> {
-    fn new(event_store: &'a PostgresEventStore<AccountState>) -> Self {
+impl<'a>
+    espg::Commands<'a, PostgresEventStore<'a, AccountState, tokio_postgres::Client>, AccountState>
+    for Commands<'a>
+{
+    fn new(event_store: &'a PostgresEventStore<'a, AccountState, tokio_postgres::Client>) -> Self {
         Self { event_store }
     }
 
-    fn event_store(&'a self) -> &'a PostgresEventStore<AccountState> {
+    fn event_store(&'a self) -> &'a PostgresEventStore<'a, AccountState, tokio_postgres::Client> {
         self.event_store
     }
 }
@@ -116,19 +117,18 @@ async fn main() -> espg::Result<()> {
             eprintln!("Connection error: {}", e);
         }
     });
-    let client = Arc::new(client);
 
     let mut active_accounts = 0;
     let mut total_balance = 0;
-    let event_store: PostgresEventStore<AccountState> =
-        PostgresEventStore::new(client.clone()).await;
+    let event_store: PostgresEventStore<AccountState, tokio_postgres::Client> =
+        PostgresEventStore::new(&client);
     event_store.initialize().await?;
     event_store.clear().await?;
 
     let stream = init_event_stream().await;
 
-    let event_store: PostgresEventStore<AccountState> =
-        PostgresEventStore::new(client.clone()).await;
+    let event_store: PostgresEventStore<'_, AccountState, tokio_postgres::Client> =
+        PostgresEventStore::new(&client);
     let commands = Commands::new(&event_store);
     let id = commands.open_account().await?;
     commands.deposit_money(&id, 100).await?;
@@ -139,8 +139,8 @@ async fn main() -> espg::Result<()> {
 
     let thread_b = {
         tokio::spawn(async move {
-            let event_store: PostgresEventStore<AccountState> =
-                PostgresEventStore::new(client).await;
+            let event_store: PostgresEventStore<'_, AccountState, tokio_postgres::Client> =
+                PostgresEventStore::new(&client);
             let commands = Commands::new(&event_store);
             commands.deposit_money(&id, 100).await?;
             commands.withdraw_money(&id, 50).await?;

@@ -2,6 +2,8 @@
 mod in_memory;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+#[cfg(feature = "postgres")]
+pub(crate) mod sql_helpers;
 
 use std::{
     fmt::Display,

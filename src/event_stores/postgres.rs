@@ -1,4 +1,4 @@
-use std::{convert::Infallible, sync::Arc};
+use std::convert::Infallible;
 
 use super::{Error, EventStream, Result};
 use crate::{
@@ -13,17 +13,18 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::{AsyncMessage, GenericClient, types::Json};
 
-pub struct PostgresEventStore<T> {
-    client: Arc<tokio_postgres::Client>,
+pub struct PostgresEventStore<'a, T, Db: GenericClient> {
+    client: &'a Db,
     aggregate_type: std::marker::PhantomData<T>,
     snapshot_interval: usize,
 }
 
-impl<'b, T> PostgresEventStore<T>
+impl<'a, T, Db> PostgresEventStore<'a, T, Db>
 where
     T: Aggregate,
+    Db: GenericClient,
 {
-    pub async fn new(client: Arc<tokio_postgres::Client>) -> Self {
+    pub fn new(client: &'a Db) -> PostgresEventStore<'a, T, Db> {
         PostgresEventStore {
             client,
             aggregate_type: std::marker::PhantomData,
@@ -31,52 +32,14 @@ where
         }
     }
 
-    pub async fn begin(
-        &'b mut self,
-    ) -> std::result::Result<PostgresEventStoreTransaction<'b, T>, tokio_postgres::Error> {
-        #[allow(clippy::expect_used)]
-        let transaction = Arc::get_mut(&mut self.client)
-            .expect("Client must be unique to begin a transaction")
-            .transaction()
-            .await?;
-        Ok(PostgresEventStoreTransaction {
-            transaction,
-            snapshot_interval: self.snapshot_interval,
-            r#type: std::marker::PhantomData,
-        })
-    }
-
     pub async fn initialize(&self) -> std::result::Result<(), tokio_postgres::Error> {
         // Create the necessary tables if they do not exist
         self.client
-            .execute(
-                r#"
-                CREATE TABLE IF NOT EXISTS events (
-                    aggregate_id TEXT NOT NULL,
-                    aggregate_type TEXT NOT NULL,
-                    version INT NOT NULL,
-                    action JSONB NOT NULL,
-                    PRIMARY KEY (aggregate_id, aggregate_type, version)
-                )
-            "#,
-                &[],
-            )
+            .batch_execute(super::sql_helpers::CREATE_EVENTS)
             .await?;
 
         self.client
-            .execute(
-                r#"
-                CREATE TABLE IF NOT EXISTS snapshots (
-                    aggregate_id TEXT NOT NULL,
-                    aggregate_type TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    version INT NOT NULL,
-                    snapshot JSONB NOT NULL,
-                    PRIMARY KEY (aggregate_id, aggregate_type, key)
-                )
-            "#,
-                &[],
-            )
+            .batch_execute(super::sql_helpers::CREATE_SNAPSHOTS)
             .await?;
 
         Ok(())
@@ -95,65 +58,7 @@ where
     }
 }
 
-pub struct PostgresEventStoreTransaction<'a, T> {
-    transaction: tokio_postgres::Transaction<'a>,
-    snapshot_interval: usize,
-    r#type: std::marker::PhantomData<T>,
-}
-
-impl<'a, T> PostgresEventStoreTransaction<'a, T> {
-    pub async fn complete(self) -> Result<()> {
-        // TODO: Handle potential conflicts
-        self.transaction.commit().await?;
-        Ok(())
-    }
-
-    pub async fn rollback(self) -> Result<()> {
-        self.transaction.rollback().await?;
-        Ok(())
-    }
-}
-
-mod private {
-    pub trait Sealed {}
-}
-
-impl<T> private::Sealed for PostgresEventStore<T> {}
-impl<T> private::Sealed for PostgresEventStoreTransaction<'_, T> {}
-
-trait WithGenericClient<B>: private::Sealed
-where
-    B: Aggregate,
-{
-    fn snapshot_interval(&self) -> usize;
-    fn get_client(&self) -> &impl tokio_postgres::GenericClient;
-}
-
-impl<T> WithGenericClient<T> for PostgresEventStore<T>
-where
-    T: Aggregate,
-{
-    fn snapshot_interval(&self) -> usize {
-        self.snapshot_interval
-    }
-    fn get_client(&self) -> &impl tokio_postgres::GenericClient {
-        self.client.as_ref()
-    }
-}
-
-impl<'r, T> WithGenericClient<T> for PostgresEventStoreTransaction<'r, T>
-where
-    T: Aggregate,
-{
-    fn snapshot_interval(&self) -> usize {
-        self.snapshot_interval
-    }
-    fn get_client(&self) -> &impl tokio_postgres::GenericClient {
-        &self.transaction
-    }
-}
-
-impl<T, U: WithGenericClient<T>> EventStore<T> for U
+impl<T, Db: GenericClient> EventStore<T> for PostgresEventStore<'_, T, Db>
 where
     T: Aggregate + Default + Serialize + DeserializeOwned,
     T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
@@ -167,7 +72,7 @@ where
         version: usize,
     ) -> Result<super::Commit<Vec<<T as Aggregate>::Event>>> {
         let rows = self
-            .get_client()
+            .client
             .query(
                 "SELECT version, action FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version > $3 ORDER BY version",
                 &[&id, &T::name(), &(version as i32)],
@@ -230,8 +135,7 @@ where
 
     async fn commit(&self, id: &str, version: usize, action: T::Event) -> Result<()> {
         let json_action: Value = serde_json::to_value(action.clone())?;
-        let client = self.get_client();
-        client
+        self.client
             .execute(
                 "INSERT INTO events (aggregate_id, aggregate_type, version, action) VALUES ($1, $2, $3, $4)",
                 &[&id, &T::name(), &(version as i32), &json_action],
@@ -245,7 +149,7 @@ where
                 }
             })?;
 
-        if version % self.snapshot_interval() == 0 {
+        if version % self.snapshot_interval == 0 {
             self.store_snapshot(id).await?;
         }
 
@@ -273,7 +177,7 @@ where
                 inner,
             } = self.try_get_commit(id).await?;
             let snapshot: Value = serde_json::to_value(inner)?;
-            self.get_client()
+            self.client
                 .execute(
                     r#"
                     INSERT INTO snapshots (aggregate_id, aggregate_type, key, version, snapshot)
@@ -290,7 +194,7 @@ where
     async fn load_snapshot(&self, id: &str) -> Result<Option<Commit<T>>> {
         if let Some(key) = T::snapshot_key() {
             let row = self
-                .get_client()
+                .client
                 .query_opt(
                     "SELECT version, snapshot FROM snapshots WHERE aggregate_id = $1 AND aggregate_type = $2 AND key = $3",
                     &[&id, &T::name(), &key],
@@ -345,10 +249,8 @@ where
     }
 
     async fn transmit(&self, _id: &str, commit: Commit<<T as Aggregate>::Event>) -> Result<()> {
-        let client = self.get_client();
-
         // Execute listen/notify
-        client
+        self.client
             .execute(
                 r#"
              SELECT pg_notify('event_notifications', $1)
@@ -459,7 +361,7 @@ where
 #[allow(clippy::expect_used)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use tokio_postgres::Socket;
+    use tokio_postgres::{Socket, Transaction};
 
     use super::*;
     use crate::tests::{Event, State};
@@ -530,10 +432,16 @@ mod tests {
         Ok((client, connection))
     }
 
-    async fn init_event_store(
-        client: Arc<tokio_postgres::Client>,
-    ) -> std::result::Result<PostgresEventStore<State>, tokio_postgres::Error> {
-        let event_store = PostgresEventStore::<State>::new(client).await;
+    async fn init_event_store<'a, 'b>(
+        client: &'a tokio_postgres::Client,
+    ) -> std::result::Result<
+        PostgresEventStore<'b, State, tokio_postgres::Client>,
+        tokio_postgres::Error,
+    >
+    where
+        'a: 'b,
+    {
+        let event_store = PostgresEventStore::new(client);
         event_store
             .initialize()
             .await
@@ -566,14 +474,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_postgres_event_store() -> Result<()> {
-        let (client, _connection) = init_conn(true).await?;
-        let client = Arc::new(client);
-        let mut event_store = init_event_store(client).await?;
-        let transaction: PostgresEventStoreTransaction<State> = event_store.begin().await?;
+        let (mut client, _connection) = init_conn(true).await?;
+        let db_transaction = client.transaction().await?;
+        let transaction = PostgresEventStore::new(&db_transaction);
 
         transaction.append("test1", Event::Increment(10)).await?;
         transaction.append("test1", Event::Decrement(4)).await?;
-        let aggregate = transaction
+        let aggregate: State = transaction
             .get_aggregate("test1")
             .await
             .expect("Aggregate not found");
@@ -593,8 +500,7 @@ mod tests {
         let (client, _connection) = init_conn(true)
             .await
             .expect("msg: Failed to connect to Postgres");
-        let client = Arc::new(client);
-        let event_store = init_event_store(client)
+        let event_store = init_event_store(&client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -614,8 +520,7 @@ mod tests {
         let (client, _connection) = init_conn(true)
             .await
             .expect("msg: Failed to connect to Postgres");
-        let client = Arc::new(client);
-        let event_store = init_event_store(client)
+        let event_store = init_event_store(&client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -636,22 +541,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback() -> Result<()> {
-        let (client, _connection) = init_conn(true)
+        let (mut client, _connection) = init_conn(true)
             .await
             .expect("msg: Failed to connect to Postgres");
-        let client = Arc::new(client);
-        let mut event_store = init_event_store(client).await.unwrap();
+
+        let event_store = init_event_store(&client).await.unwrap();
         event_store.commit("test3", 1, Event::Increment(10)).await?;
 
         let commit = event_store.try_get_commit("test3").await?;
         assert_eq!(commit.version, 1);
         assert_eq!(commit.inner.value, 10);
 
-        let transaction = event_store.begin().await?;
+        let db_transaction = client.transaction().await?;
+        let transaction: PostgresEventStore<State, Transaction> =
+            PostgresEventStore::new(&db_transaction);
         transaction.append("test3", Event::Decrement(4)).await?;
-        transaction.rollback().await?;
+        db_transaction.rollback().await?;
 
-        let commit = event_store.try_get_commit("test3").await?;
+        let event_store = PostgresEventStore::new(&client);
+        let commit: Commit<State> = event_store.try_get_commit("test3").await?;
         assert_eq!(commit.version, 1);
         assert_eq!(commit.inner.value, 10);
 
@@ -663,8 +571,8 @@ mod tests {
         let (client, _connection) = init_conn(true)
             .await
             .expect("msg: Failed to connect to Postgres");
-        let client = Arc::new(client);
-        let event_store = init_event_store(client)
+
+        let event_store = init_event_store(&client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -700,33 +608,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_inheriting_snapshot_interval() -> Result<()> {
-        let (client, _connection) = init_conn(true)
-            .await
-            .expect("msg: Failed to connect to Postgres");
-        let client = Arc::new(client);
-        let mut event_store = init_event_store(client)
-            .await
-            .expect("msg: Failed to create event store");
-
-        let parent_interval = event_store.snapshot_interval();
-        let transaction = event_store.begin().await?;
-        assert_eq!(
-            parent_interval,
-            transaction.snapshot_interval(),
-            "Snapshot intervals should match"
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_streaming() -> Result<()> {
         let (client, _connection) = init_conn(true)
             .await
             .expect("msg: Failed to connect to Postgres");
-        let client = Arc::new(client);
-        let event_store = init_event_store(client)
+
+        let event_store = init_event_store(&client)
             .await
             .expect("msg: Failed to create event store");
         // Implement Stream as a custom struct with `next().await` method
@@ -801,8 +688,8 @@ mod tests {
         let (client, _connection) = init_conn(true)
             .await
             .expect("msg: Failed to connect to Postgres");
-        let client = Arc::new(client);
-        let event_store = init_event_store(client)
+
+        let event_store = init_event_store(&client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -868,26 +755,5 @@ mod tests {
         }
 
         Ok(())
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "Client must be unique to begin a transaction")]
-    async fn test_panic_on_multiple_transactions() {
-        let (client, _connection) = init_conn(true)
-            .await
-            .expect("msg: Failed to connect to Postgres");
-        let client = Arc::new(client);
-        let mut event_store_a = init_event_store(client.clone())
-            .await
-            .expect("msg: Failed to create event store a");
-        let mut event_store_b = init_event_store(client)
-            .await
-            .expect("msg: Failed to create event store b");
-
-        let _ = event_store_a
-            .begin()
-            .await
-            .expect("Failed to begin transaction A");
-        let _ = event_store_b.begin().await;
     }
 }
