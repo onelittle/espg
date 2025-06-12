@@ -33,6 +33,19 @@ where
     }
 }
 
+#[cfg(feature = "deadpool")]
+impl<'a, 'b, T> From<&'a deadpool_postgres::ClientWrapper>
+    for PostgresEventStore<'b, T, tokio_postgres::Client>
+where
+    'a: 'b,
+    T: Aggregate,
+{
+    fn from(client: &'a deadpool_postgres::ClientWrapper) -> Self {
+        let client = &**client;
+        PostgresEventStore::new(client)
+    }
+}
+
 pub async fn initialize(
     client: &tokio_postgres::Client,
 ) -> std::result::Result<(), tokio_postgres::Error> {
