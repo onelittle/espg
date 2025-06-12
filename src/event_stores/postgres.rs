@@ -758,4 +758,33 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_deadpool_integration() -> Result<()> {
+        use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod, Runtime};
+        use tokio_postgres::NoTls;
+
+        let mut cfg = Config::new();
+        cfg.url = Some(
+            get_connection_string()
+                .await
+                .expect("Failed to get connection string"),
+        );
+        cfg.manager = Some(ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        });
+        let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
+
+        let client = pool.get().await.expect("Failed to get client from pool");
+        let event_store = init_event_store(&client).await?;
+
+        event_store.append("test6", Event::Increment(10)).await?;
+        event_store.append("test6", Event::Decrement(5)).await?;
+
+        let aggregate = event_store.get_aggregate("test6").await;
+        assert!(aggregate.is_some(), "Expected aggregate to be found");
+        assert_eq!(aggregate.unwrap().value, 5);
+
+        Ok(())
+    }
 }
