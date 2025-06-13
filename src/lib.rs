@@ -16,9 +16,11 @@ pub use event_stores::{EventStream, StreamingEventStore};
 pub use event_stores::postgres::PostgresEventStream;
 
 #[allow(async_fn_in_trait)]
-pub trait Commands<'a, E: EventStore<T> + 'a, T: Aggregate + Default>
+pub trait Commands<'a, E, T>
 where
     Self: 'a,
+    E: EventStore<T> + 'a,
+    T: Aggregate + Default + 'a,
 {
     fn new(event_store: &'a E) -> Self;
     fn event_store(&'a self) -> &'a E;
@@ -31,10 +33,10 @@ where
         self.event_store().append(id, event).await
     }
 
-    async fn retry_on_version_conflict<'b, F, Fut>(&'a self, mut f: F) -> Result<()>
+    async fn retry_on_version_conflict<'b, F, Fut, R>(&'a self, mut f: F) -> Result<()>
     where
         F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<()>> + 'b,
+        Fut: std::future::Future<Output = Result<R>> + 'b,
         'a: 'b,
     {
         loop {

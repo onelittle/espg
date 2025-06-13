@@ -54,24 +54,21 @@ fn update_stats_display(active_accounts: usize, total_balance: i64) {
     );
 }
 
-struct Commands<'a> {
-    event_store: &'a PostgresEventStore<'a, AccountState, tokio_postgres::Client>,
+struct Commands<'a, E: EventStore<AccountState>> {
+    event_store: &'a E,
 }
 
-impl<'a>
-    espg::Commands<'a, PostgresEventStore<'a, AccountState, tokio_postgres::Client>, AccountState>
-    for Commands<'a>
-{
-    fn new(event_store: &'a PostgresEventStore<'a, AccountState, tokio_postgres::Client>) -> Self {
+impl<'a, E: EventStore<AccountState>> espg::Commands<'a, E, AccountState> for Commands<'a, E> {
+    fn new(event_store: &'a E) -> Self {
         Self { event_store }
     }
 
-    fn event_store(&'a self) -> &'a PostgresEventStore<'a, AccountState, tokio_postgres::Client> {
+    fn event_store(&'a self) -> &'a E {
         self.event_store
     }
 }
 
-impl<'a> Commands<'a> {
+impl<'a, E: EventStore<AccountState>> Commands<'a, E> {
     async fn open_account(&'a self) -> Result<String, espg::Error> {
         let id = uuid::Uuid::new_v4().to_string();
         self.commit(&id, 1, Event::AccountOpened).await?;

@@ -63,10 +63,7 @@ pub struct Commit<T> {
 }
 
 #[allow(async_fn_in_trait)]
-pub trait EventStore<T>
-where
-    T: Aggregate + Default,
-{
+pub trait EventStore<T: Aggregate + Default> {
     async fn append(&self, id: &str, event: T::Event) -> Result<()>;
     async fn commit(&self, id: &str, version: usize, event: T::Event) -> Result<()>;
     async fn try_get_events_since(&self, id: &str, version: usize)
