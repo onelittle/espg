@@ -1,10 +1,10 @@
 use super::{Error, Result};
-#[cfg(feature = "streaming")]
-use crate::EventStream;
 use crate::{
     Aggregate, EventStore,
     event_stores::{Commit, Diagnostics},
 };
+#[cfg(feature = "streaming")]
+use crate::{EventStream, StreamingEventStore};
 use futures_channel::mpsc;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -77,9 +77,6 @@ where
     T: Aggregate + Default + Serialize + DeserializeOwned,
     T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
 {
-    type StreamReceiver = mpsc::UnboundedReceiver<Commit<T::Event>>;
-    type StreamClient = tokio_postgres::Client;
-
     async fn try_get_events_since(
         &self,
         id: &str,
@@ -262,8 +259,17 @@ where
             }
         }
     }
+}
 
-    #[cfg(feature = "streaming")]
+#[cfg(feature = "streaming")]
+impl<T: Aggregate + Default + Serialize + DeserializeOwned, Db: GenericClient>
+    StreamingEventStore<T> for PostgresEventStore<'_, T, Db>
+where
+    T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
+{
+    type StreamReceiver = mpsc::UnboundedReceiver<Commit<T::Event>>;
+    type StreamClient = Db;
+
     async fn transmit(&self, _id: &str, commit: Commit<<T as Aggregate>::Event>) -> Result<()> {
         // Execute listen/notify
         self.client
@@ -278,14 +284,12 @@ where
         Ok(())
     }
 
-    #[cfg(feature = "streaming")]
     #[allow(unused)]
     async fn stream(&self) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
         let (_tx, rx) = mpsc::unbounded::<Commit<T::Event>>();
         todo!("Implement client handling for stream_for");
     }
 
-    #[cfg(feature = "streaming")]
     #[allow(unused)]
     async fn stream_for(&self, _id: &str) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
         let (_tx, rx) = mpsc::unbounded::<Commit<T::Event>>();
@@ -522,6 +526,9 @@ mod tests {
     #[tokio::test]
     async fn test_postgres_event_store() -> Result<()> {
         let (mut client, _connection) = init_conn(true).await?;
+        super::initialize(&client).await?;
+        super::clear(&client).await?;
+
         let db_transaction = client.transaction().await?;
         let transaction = PostgresEventStore::new(&db_transaction);
 

@@ -8,7 +8,7 @@ use tokio::sync::broadcast::{Receiver, error::SendError};
 use super::{Commit, Error, EventStore, Result};
 use crate::Aggregate;
 #[cfg(feature = "streaming")]
-use crate::EventStream;
+use crate::{EventStream, StreamingEventStore};
 
 type CommitTuple<T> = (usize, Vec<T>);
 
@@ -64,9 +64,6 @@ where
     T: Aggregate + Default,
     T::Event: Clone + Send + 'static,
 {
-    type StreamReceiver = Receiver<Commit<T::Event>>;
-    type StreamClient = ();
-
     async fn append(&self, id: &str, action: T::Event) -> Result<()> {
         let version = {
             let mut store = self.store.write().await;
@@ -134,6 +131,15 @@ where
                 .collect(),
         })
     }
+}
+
+#[cfg(feature = "streaming")]
+impl<T: Aggregate + Default> StreamingEventStore<T> for InMemoryEventStore<T>
+where
+    T::Event: Clone + Send + 'static,
+{
+    type StreamReceiver = Receiver<Commit<T::Event>>;
+    type StreamClient = ();
 
     #[cfg(feature = "streaming")]
     async fn transmit(&self, _: &str, commit: Commit<T::Event>) -> Result<()> {

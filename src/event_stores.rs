@@ -61,9 +61,6 @@ pub trait EventStore<T>
 where
     T: Aggregate + Default,
 {
-    type StreamReceiver;
-    type StreamClient;
-
     async fn append(&self, id: &str, event: T::Event) -> Result<()>;
     async fn commit(&self, id: &str, version: usize, event: T::Event) -> Result<()>;
     async fn try_get_events_since(&self, id: &str, version: usize)
@@ -109,6 +106,16 @@ where
     async fn load_snapshot(&self, id: &str) -> Result<Option<Commit<T>>> {
         Ok(None)
     }
+}
+
+#[cfg(feature = "streaming")]
+#[allow(async_fn_in_trait)]
+pub trait StreamingEventStore<T: Aggregate + Default>
+where
+    Self: EventStore<T>,
+{
+    type StreamReceiver;
+    type StreamClient;
 
     #[cfg(feature = "streaming")]
     async fn transmit(&self, id: &str, event: Commit<T::Event>) -> Result<()>;
