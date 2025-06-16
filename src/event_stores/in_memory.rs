@@ -81,6 +81,7 @@ where
             inner: action,
             diagnostics: None,
         };
+        #[cfg(feature = "streaming")]
         self.transmit(id, commit).await?;
         Ok(())
     }
@@ -105,6 +106,7 @@ where
             inner: action,
             diagnostics: None,
         };
+        #[cfg(feature = "streaming")]
         self.transmit(id, commit).await?;
         Ok(())
     }
@@ -133,6 +135,7 @@ where
         })
     }
 
+    #[cfg(feature = "streaming")]
     async fn transmit(&self, _: &str, commit: Commit<T::Event>) -> Result<()> {
         match &self.broadcast.send(commit) {
             Ok(_) => {}

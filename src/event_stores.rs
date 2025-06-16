@@ -110,6 +110,7 @@ where
         Ok(None)
     }
 
+    #[cfg(feature = "streaming")]
     async fn transmit(&self, id: &str, event: Commit<T::Event>) -> Result<()>;
     #[cfg(feature = "streaming")]
     async fn stream(&self) -> EventStream<Self::StreamReceiver, Self::StreamClient>;

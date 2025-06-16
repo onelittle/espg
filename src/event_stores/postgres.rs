@@ -167,6 +167,7 @@ where
             self.store_snapshot(id).await?;
         }
 
+        #[cfg(feature = "streaming")]
         self.transmit(
             id,
             Commit {
@@ -262,6 +263,7 @@ where
         }
     }
 
+    #[cfg(feature = "streaming")]
     async fn transmit(&self, _id: &str, commit: Commit<<T as Aggregate>::Event>) -> Result<()> {
         // Execute listen/notify
         self.client
