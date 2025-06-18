@@ -106,23 +106,22 @@ where
     async fn load_snapshot(&self, id: &str) -> Result<Option<Commit<T>>> {
         Ok(None)
     }
+
+    #[cfg(feature = "streaming")]
+    async fn transmit(&self, event: Commit<T::Event>) -> Result<()>;
 }
 
 #[cfg(feature = "streaming")]
 #[allow(async_fn_in_trait)]
-pub trait StreamingEventStore<T: Aggregate + Default>
-where
-    Self: EventStore<T>,
-{
+pub trait StreamingEventStore<'a, T: Aggregate + Default> {
     type StreamReceiver;
     type StreamClient;
 
     #[cfg(feature = "streaming")]
-    async fn transmit(&self, id: &str, event: Commit<T::Event>) -> Result<()>;
-    #[cfg(feature = "streaming")]
-    async fn stream(&self) -> EventStream<Self::StreamReceiver, Self::StreamClient>;
-    #[cfg(feature = "streaming")]
-    async fn stream_for(&self, _id: &str) -> EventStream<Self::StreamReceiver, Self::StreamClient>;
+    async fn stream_for(
+        self,
+        id: &str,
+    ) -> Result<EventStream<Self::StreamReceiver, Self::StreamClient>>;
 }
 
 #[cfg(feature = "streaming")]

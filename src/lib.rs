@@ -8,12 +8,12 @@ pub use event_stores::InMemoryEventStore;
 pub use event_stores::PostgresEventStore;
 pub use event_stores::{Commit, Error, EventStore, Result};
 
-#[cfg(feature = "postgres")]
-#[cfg(feature = "streaming")]
-pub use event_stores::postgres::stream as postgres_stream;
-
 #[cfg(feature = "streaming")]
 pub use event_stores::{EventStream, StreamingEventStore};
+
+#[cfg(feature = "streaming")]
+#[cfg(feature = "postgres")]
+pub use event_stores::postgres::PostgresEventStream;
 
 #[allow(async_fn_in_trait)]
 pub trait Commands<'a, E: EventStore<T> + 'a, T: Aggregate + Default> {

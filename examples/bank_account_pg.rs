@@ -1,6 +1,9 @@
-use espg::{Aggregate, Commands as _, Commit, EventStore, EventStream, PostgresEventStore};
+use espg::{
+    Aggregate, Commands as _, Commit, EventStore, EventStream, PostgresEventStore,
+    PostgresEventStream, StreamingEventStore,
+};
 use serde::{Deserialize, Serialize};
-use tokio_postgres::{NoTls, Socket, tls::NoTlsStream};
+use tokio_postgres::NoTls;
 use tokio_stream::StreamExt;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -96,16 +99,18 @@ impl<'a> Commands<'a> {
 }
 
 #[allow(clippy::expect_used)]
-async fn init_event_stream()
--> EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<Event>>, tokio_postgres::Client> {
+async fn init_event_stream(
+    id: &str,
+) -> EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<Event>>, tokio_postgres::Client> {
     let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
     let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
         .await
         .expect("Failed to connect to Postgres");
 
-    espg::postgres_stream::<AccountState, Socket, NoTlsStream>(client, connection)
+    let es = PostgresEventStream::<AccountState>::new(client, connection).await;
+    es.stream_for(id)
         .await
-        .expect("Failed to initialize event stream")
+        .expect("Failed to create event stream")
 }
 
 #[tokio::main]
@@ -124,7 +129,7 @@ async fn main() -> espg::Result<()> {
     espg::event_stores::postgres::initialize(&client).await?;
     espg::event_stores::postgres::clear(&client).await?;
 
-    let stream = init_event_stream().await;
+    let stream = init_event_stream("id").await;
 
     let event_store: PostgresEventStore<AccountState, tokio_postgres::Client> =
         PostgresEventStore::new(&client);
