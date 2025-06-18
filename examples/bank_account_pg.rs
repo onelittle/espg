@@ -99,18 +99,15 @@ impl<'a> Commands<'a> {
 }
 
 #[allow(clippy::expect_used)]
-async fn init_event_stream(
-    id: &str,
-) -> EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<Event>>, tokio_postgres::Client> {
+async fn init_event_stream()
+-> EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<Event>>, tokio_postgres::Client> {
     let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
     let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
         .await
         .expect("Failed to connect to Postgres");
 
     let es = PostgresEventStream::<AccountState>::new(client, connection).await;
-    es.stream_for(id)
-        .await
-        .expect("Failed to create event stream")
+    es.stream().await.expect("Failed to create event stream")
 }
 
 #[tokio::main]
@@ -129,7 +126,7 @@ async fn main() -> espg::Result<()> {
     espg::event_stores::postgres::initialize(&client).await?;
     espg::event_stores::postgres::clear(&client).await?;
 
-    let stream = init_event_stream("id").await;
+    let stream = init_event_stream().await;
 
     let event_store: PostgresEventStore<AccountState, tokio_postgres::Client> =
         PostgresEventStore::new(&client);

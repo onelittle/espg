@@ -8,6 +8,8 @@ pub(crate) mod sql_helpers;
 mod streaming;
 
 use crate::Aggregate;
+#[cfg(feature = "streaming")]
+use futures::Stream;
 #[cfg(feature = "inmem")]
 pub use in_memory::InMemoryEventStore;
 #[cfg(feature = "postgres")]
@@ -118,12 +120,8 @@ where
 #[cfg(feature = "streaming")]
 #[allow(async_fn_in_trait)]
 pub trait StreamingEventStore<'a, T: Aggregate + Default> {
-    type StreamReceiver;
-    type StreamClient;
+    type StreamType: Stream<Item = Commit<T::Event>>;
 
     #[cfg(feature = "streaming")]
-    async fn stream_for(
-        self,
-        id: &str,
-    ) -> Result<EventStream<Self::StreamReceiver, Self::StreamClient>>;
+    async fn stream(self) -> Result<Self::StreamType>;
 }

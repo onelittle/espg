@@ -3,12 +3,14 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use indexmap::IndexMap;
-use tokio::sync::broadcast::{Receiver, error::SendError};
+use tokio::sync::broadcast::error::SendError;
+#[cfg(feature = "streaming")]
+use tokio_stream::wrappers::{UnboundedReceiverStream, errors::BroadcastStreamRecvError};
 
 use super::{Commit, Error, EventStore, Result};
 use crate::Aggregate;
 #[cfg(feature = "streaming")]
-use crate::{EventStream, StreamingEventStore};
+use crate::StreamingEventStore;
 
 type CommitTuple<T> = (usize, Vec<T>);
 
@@ -20,7 +22,6 @@ where
 {
     pub(crate) store: Arc<RwLock<IndexMap<String, CommitTuple<T::Event>>>>,
     broadcast: tokio::sync::broadcast::Sender<Commit<T::Event>>,
-    _rx: tokio::sync::broadcast::Receiver<Commit<T::Event>>,
     #[cfg(test)]
     pub(crate) version_conflicts: AtomicUsize,
 }
@@ -31,11 +32,9 @@ where
 {
     fn clone(&self) -> Self {
         let tx = self.broadcast.clone();
-        let rx = tx.subscribe();
         InMemoryEventStore {
             store: Arc::clone(&self.store),
             broadcast: tx,
-            _rx: rx,
             #[cfg(test)]
             version_conflicts: AtomicUsize::new(0),
         }
@@ -48,11 +47,10 @@ where
     T::Event: Clone,
 {
     fn default() -> Self {
-        let (tx, rx) = tokio::sync::broadcast::channel::<Commit<T::Event>>(100);
+        let (tx, _rx) = tokio::sync::broadcast::channel::<Commit<T::Event>>(100);
         InMemoryEventStore {
             store: Arc::new(RwLock::new(IndexMap::new())),
             broadcast: tx,
-            _rx: rx,
             #[cfg(test)]
             version_conflicts: AtomicUsize::new(0),
         }
@@ -79,7 +77,7 @@ where
             diagnostics: None,
         };
         #[cfg(feature = "streaming")]
-        self.transmit(id, commit).await?;
+        self.transmit(commit).await?;
         Ok(())
     }
 
@@ -104,7 +102,7 @@ where
             diagnostics: None,
         };
         #[cfg(feature = "streaming")]
-        self.transmit(id, commit).await?;
+        self.transmit(commit).await?;
         Ok(())
     }
 
@@ -131,18 +129,8 @@ where
                 .collect(),
         })
     }
-}
-
-#[cfg(feature = "streaming")]
-impl<T: Aggregate + Default> StreamingEventStore<T> for InMemoryEventStore<T>
-where
-    T::Event: Clone + Send + 'static,
-{
-    type StreamReceiver = Receiver<Commit<T::Event>>;
-    type StreamClient = ();
-
     #[cfg(feature = "streaming")]
-    async fn transmit(&self, _: &str, commit: Commit<T::Event>) -> Result<()> {
+    async fn transmit(&self, commit: Commit<T::Event>) -> Result<()> {
         match &self.broadcast.send(commit) {
             Ok(_) => {}
             Err(SendError(_event)) => {
@@ -151,15 +139,41 @@ where
         }
         Ok(())
     }
+}
+
+#[cfg(feature = "streaming")]
+impl<'a, T: Aggregate + Default> StreamingEventStore<'a, T> for InMemoryEventStore<T>
+where
+    T::Event: Clone + Send + 'static,
+{
+    type StreamType = UnboundedReceiverStream<Commit<T::Event>>;
 
     #[cfg(feature = "streaming")]
-    async fn stream(&self) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
-        EventStream::new(self.broadcast.subscribe(), ())
-    }
+    async fn stream(self) -> Result<Self::StreamType> {
+        use tokio_stream::wrappers::{BroadcastStream, UnboundedReceiverStream};
+        let rx = self.broadcast.subscribe();
+        let stream = BroadcastStream::new(rx);
+        let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            use tokio_stream::StreamExt;
 
-    #[cfg(feature = "streaming")]
-    async fn stream_for(&self, _id: &str) -> EventStream<Self::StreamReceiver, Self::StreamClient> {
-        EventStream::new(self.broadcast.subscribe(), ())
+            let mut stream = stream;
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(commit) => {
+                        if tx1.send(commit).is_err() {
+                            eprintln!("Stream closed, cannot send event");
+                            break;
+                        }
+                    }
+                    Err(BroadcastStreamRecvError::Lagged(_)) => {
+                        eprintln!("Stream lagged, skipping events");
+                    }
+                }
+            }
+        });
+        let stream = UnboundedReceiverStream::new(rx1);
+        Ok(stream)
     }
 }
 

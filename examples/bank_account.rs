@@ -1,4 +1,5 @@
-use espg::{Aggregate, EventStore, InMemoryEventStore};
+use espg::{Aggregate, EventStore, InMemoryEventStore, StreamingEventStore};
+use tokio_stream::StreamExt;
 
 #[derive(Default)]
 struct AccountState {
@@ -80,35 +81,36 @@ impl<'a, E: EventStore<AccountState>> Commands<'a, E> {
 }
 
 #[tokio::main]
+#[allow(clippy::expect_used)]
 async fn main() -> espg::Result<()> {
     let event_store: InMemoryEventStore<AccountState> = InMemoryEventStore::default();
-    let mut _active_accounts = 0;
-    let mut _total_balance = 0;
+    let mut active_accounts = 0;
+    let mut total_balance = 0;
 
     let stream_handler = {
-        let _event_store = event_store.clone();
+        let event_store = event_store.clone();
         tokio::spawn(async move {
-            // let mut stream = event_store.stream().await;
-            // while let Some(Ok(commit)) = stream.next().await {
-            //     let event = commit.inner;
-            //     match event {
-            //         Event::AccountOpened => {
-            //             active_accounts += 1;
-            //             total_balance += 0; // New account starts with zero balance
-            //         }
-            //         Event::MoneyDeposited(amount) => {
-            //             total_balance += amount;
-            //         }
-            //         Event::MoneyWithdrawn(amount) => {
-            //             total_balance -= amount;
-            //         }
-            //         Event::AccountClosed => {
-            //             active_accounts -= 1;
-            //         }
-            //     }
+            let mut stream = event_store.stream().await.expect("Failed to create stream");
+            while let Some(commit) = stream.next().await {
+                let event = commit.inner;
+                match event {
+                    Event::AccountOpened => {
+                        active_accounts += 1;
+                        total_balance += 0; // New account starts with zero balance
+                    }
+                    Event::MoneyDeposited(amount) => {
+                        total_balance += amount;
+                    }
+                    Event::MoneyWithdrawn(amount) => {
+                        total_balance -= amount;
+                    }
+                    Event::AccountClosed => {
+                        active_accounts -= 1;
+                    }
+                }
 
-            //     update_stats_display(active_accounts, total_balance);
-            // }
+                update_stats_display(active_accounts, total_balance);
+            }
         })
     };
 

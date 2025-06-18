@@ -1,8 +1,8 @@
 use std::{
     pin::Pin,
-    sync::mpsc::Receiver,
     task::{Context, Poll},
 };
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_stream::Stream;
 
@@ -12,9 +12,9 @@ pub struct EventStream<R, X> {
     _client: X,
 }
 
-impl<R, X> EventStream<R, X> {
+impl<I, X> EventStream<UnboundedReceiver<I>, X> {
     /// Create a new `UnboundedReceiverStream`.
-    pub fn new(recv: R, client: X) -> Self {
+    pub fn new(recv: UnboundedReceiver<I>, client: X) -> Self {
         Self {
             inner: recv,
             _client: client,
@@ -22,7 +22,7 @@ impl<R, X> EventStream<R, X> {
     }
 
     /// Get back the inner `UnboundedReceiver`.
-    pub fn into_inner(self) -> R {
+    pub fn into_inner(self) -> UnboundedReceiver<I> {
         self.inner
     }
 }
