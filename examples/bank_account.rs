@@ -1,13 +1,14 @@
-use espg::{Aggregate, EventStore, InMemoryEventStore, StreamingEventStore};
+use espg::{Aggregate, Commands as _, EventStore, InMemoryEventStore, StreamingEventStore};
+use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct AccountState {
     active: bool,
     balance: i64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 enum Event {
     AccountOpened,
     MoneyDeposited(i64),
@@ -42,7 +43,6 @@ impl Aggregate for AccountState {
     }
 }
 
-#[allow(dead_code)]
 fn update_stats_display(active_accounts: usize, total_balance: i64) {
     println!(
         "Active accounts: {} | Total balance: {}",
@@ -50,102 +50,106 @@ fn update_stats_display(active_accounts: usize, total_balance: i64) {
     );
 }
 
-struct Commands<'a, E: EventStore<AccountState>> {
-    event_store: &'a E,
+#[derive(Clone)]
+struct Commands<'a> {
+    event_store: &'a InMemoryEventStore<AccountState>,
 }
 
-impl<'a, E: EventStore<AccountState>> Commands<'a, E> {
-    fn new(event_store: &'a E) -> Self {
-        Commands { event_store }
+impl<'a> espg::Commands<'a, InMemoryEventStore<AccountState>, AccountState> for Commands<'a> {
+    fn new(event_store: &'a InMemoryEventStore<AccountState>) -> Self {
+        Self { event_store }
     }
 
-    async fn open_account(&mut self, id: &str) -> Result<(), espg::Error> {
-        self.event_store.append(id, Event::AccountOpened).await
-    }
-
-    async fn deposit_money(&mut self, id: &str, amount: i64) -> Result<(), espg::Error> {
+    fn event_store(&'a self) -> &'a InMemoryEventStore<AccountState> {
         self.event_store
-            .append(id, Event::MoneyDeposited(amount))
-            .await
+    }
+}
+
+impl<'a> Commands<'a> {
+    async fn open_account(&'a self) -> Result<String, espg::Error> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.commit(&id, 1, Event::AccountOpened).await?;
+        Ok(id)
     }
 
-    async fn withdraw_money(&mut self, id: &str, amount: i64) -> Result<(), espg::Error> {
-        self.event_store
-            .append(id, Event::MoneyWithdrawn(amount))
-            .await
+    async fn deposit_money(&'a self, id: &str, amount: i64) -> Result<(), espg::Error> {
+        self.append(id, Event::MoneyDeposited(amount)).await
     }
 
-    async fn close_account(&mut self, id: &str) -> Result<(), espg::Error> {
-        self.event_store.append(id, Event::AccountClosed).await
+    async fn withdraw_money(&'a self, id: &str, amount: i64) -> Result<(), espg::Error> {
+        self.retry_on_version_conflict(|| async {
+            #[allow(clippy::unwrap_used)]
+            let commit = self.event_store.get_commit(id).await.unwrap();
+            self.event_store
+                .commit(id, commit.version + 1, Event::MoneyWithdrawn(amount))
+                .await
+        })
+        .await
+    }
+
+    async fn close_account(&'a self, id: &str) -> Result<(), espg::Error> {
+        self.append(id, Event::AccountClosed).await
     }
 }
 
 #[tokio::main]
-#[allow(clippy::expect_used)]
 async fn main() -> espg::Result<()> {
-    let event_store: InMemoryEventStore<AccountState> = InMemoryEventStore::default();
     let mut active_accounts = 0;
     let mut total_balance = 0;
 
-    let stream_handler = {
-        let event_store = event_store.clone();
-        tokio::spawn(async move {
-            let mut stream = event_store.stream().await.expect("Failed to create stream");
-            while let Some(commit) = stream.next().await {
-                let event = commit.inner;
-                match event {
-                    Event::AccountOpened => {
-                        active_accounts += 1;
-                        total_balance += 0; // New account starts with zero balance
-                    }
-                    Event::MoneyDeposited(amount) => {
-                        total_balance += amount;
-                    }
-                    Event::MoneyWithdrawn(amount) => {
-                        total_balance -= amount;
-                    }
-                    Event::AccountClosed => {
-                        active_accounts -= 1;
-                    }
-                }
+    let event_store: InMemoryEventStore<AccountState> = InMemoryEventStore::default();
+    let stream = event_store.clone().stream().await?;
 
-                update_stats_display(active_accounts, total_balance);
-            }
-        })
-    };
-
-    let thread_a = {
-        let event_store = event_store.clone();
-        tokio::spawn(async move {
-            let mut commands = Commands::new(&event_store);
-            commands.open_account("account1").await?;
-            commands.deposit_money("account1", 100).await?;
-            commands.withdraw_money("account1", 50).await?;
-            commands.open_account("account1").await?;
-            commands.deposit_money("account2", 200).await?;
-            commands.close_account("account2").await?;
-
-            espg::Result::Ok(())
-        })
-    };
+    let commands = Commands::new(&event_store);
+    let id = commands.open_account().await?;
+    commands.deposit_money(&id, 100).await?;
+    commands.withdraw_money(&id, 50).await?;
+    let id2 = commands.open_account().await?;
+    commands.deposit_money(&id2, 200).await?;
+    commands.close_account(&id2).await?;
 
     let thread_b = {
         let event_store = event_store.clone();
         tokio::spawn(async move {
-            let mut commands = Commands::new(&event_store);
-            commands.deposit_money("account1", 100).await?;
-            commands.withdraw_money("account1", 50).await?;
+            let commands = Commands::new(&event_store);
+            let id = commands.open_account().await?;
+            commands.deposit_money(&id, 100).await?;
+            commands.withdraw_money(&id, 50).await?;
 
             espg::Result::Ok(())
         })
     };
 
-    match tokio::try_join!(thread_a, thread_b) {
+    match tokio::try_join!(thread_b) {
         Ok(_) => println!("All commands executed successfully."),
         Err(e) => eprintln!("Error executing commands: {}", e),
     }
 
-    stream_handler.abort();
+    let mut n = 0;
+    let mut stream = stream.take(8);
+    while let Some(commit) = stream.next().await {
+        n += 1;
+        eprintln!("Received event number {}", n);
+        let event = commit.inner;
+        match event {
+            Event::AccountOpened => {
+                active_accounts += 1;
+                total_balance += 0; // New account starts with zero balance
+            }
+            Event::MoneyDeposited(amount) => {
+                total_balance += amount;
+            }
+            Event::MoneyWithdrawn(amount) => {
+                total_balance -= amount;
+            }
+            Event::AccountClosed => {
+                active_accounts -= 1;
+            }
+        }
+
+        update_stats_display(active_accounts, total_balance);
+    }
+    eprintln!("Event stream ended. {} events processed.", n);
 
     Ok(())
 }

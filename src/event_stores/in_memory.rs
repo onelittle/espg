@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use indexmap::IndexMap;
+#[cfg(feature = "streaming")]
 use tokio::sync::broadcast::error::SendError;
 #[cfg(feature = "streaming")]
 use tokio_stream::wrappers::{UnboundedReceiverStream, errors::BroadcastStreamRecvError};
@@ -22,6 +23,7 @@ where
 {
     pub(crate) store: Arc<RwLock<IndexMap<String, CommitTuple<T::Event>>>>,
     broadcast: tokio::sync::broadcast::Sender<Commit<T::Event>>,
+    _rx: Option<tokio::sync::broadcast::Receiver<Commit<T::Event>>>,
     #[cfg(test)]
     pub(crate) version_conflicts: AtomicUsize,
 }
@@ -33,8 +35,9 @@ where
     fn clone(&self) -> Self {
         let tx = self.broadcast.clone();
         InMemoryEventStore {
-            store: Arc::clone(&self.store),
+            store: self.store.clone(),
             broadcast: tx,
+            _rx: None,
             #[cfg(test)]
             version_conflicts: AtomicUsize::new(0),
         }
@@ -51,6 +54,7 @@ where
         InMemoryEventStore {
             store: Arc::new(RwLock::new(IndexMap::new())),
             broadcast: tx,
+            _rx: Some(_rx),
             #[cfg(test)]
             version_conflicts: AtomicUsize::new(0),
         }
@@ -70,14 +74,14 @@ where
             previous_commit.1.push(action.clone());
             previous_commit.0
         };
-        let commit = Commit {
+        let _commit = Commit {
             id: id.to_string(),
             version, // Version is not used in this context
             inner: action,
             diagnostics: None,
         };
         #[cfg(feature = "streaming")]
-        self.transmit(commit).await?;
+        self.transmit(_commit).await?;
         Ok(())
     }
 
@@ -95,14 +99,14 @@ where
             previous_commit.1.push(action.clone());
             previous_commit.0
         };
-        let commit = Commit {
+        let _commit = Commit {
             id: id.to_string(),
             version,
             inner: action,
             diagnostics: None,
         };
         #[cfg(feature = "streaming")]
-        self.transmit(commit).await?;
+        self.transmit(_commit).await?;
         Ok(())
     }
 
@@ -132,7 +136,9 @@ where
     #[cfg(feature = "streaming")]
     async fn transmit(&self, commit: Commit<T::Event>) -> Result<()> {
         match &self.broadcast.send(commit) {
-            Ok(_) => {}
+            Ok(_) => {
+                eprintln!("Transmitted event successfully");
+            }
             Err(SendError(_event)) => {
                 eprintln!("Stream closed, cannot send event");
             }
@@ -152,18 +158,35 @@ where
     async fn stream(self) -> Result<Self::StreamType> {
         use tokio_stream::wrappers::{BroadcastStream, UnboundedReceiverStream};
         let rx = self.broadcast.subscribe();
-        let stream = BroadcastStream::new(rx);
-        let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel();
+        let mut stream = BroadcastStream::new(rx);
+        let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel::<Commit<T::Event>>();
+        let store = self.store.read().await;
+        let stream2 = UnboundedReceiverStream::new(rx1);
+
+        for (id, (_, events)) in store.iter() {
+            for (version_index, event) in events.iter().enumerate() {
+                let version = version_index + 1; // Versioning starts from 1
+                let commit = Commit {
+                    id: id.clone(),
+                    version,
+                    inner: event.clone(),
+                    diagnostics: None,
+                };
+                if tx1.send(commit).is_err() {
+                    eprintln!("Stream closed, cannot send initial event");
+                }
+            }
+        }
+
         tokio::spawn(async move {
             use tokio_stream::StreamExt;
 
-            let mut stream = stream;
             while let Some(result) = stream.next().await {
+                eprintln!("Processing event from stream");
                 match result {
                     Ok(commit) => {
                         if tx1.send(commit).is_err() {
                             eprintln!("Stream closed, cannot send event");
-                            break;
                         }
                     }
                     Err(BroadcastStreamRecvError::Lagged(_)) => {
@@ -171,9 +194,10 @@ where
                     }
                 }
             }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            eprintln!("Stream processing ended...");
         });
-        let stream = UnboundedReceiverStream::new(rx1);
-        Ok(stream)
+        Ok(stream2)
     }
 }
 
@@ -232,6 +256,157 @@ mod tests {
 
         let aggregate = event_store.get_aggregate("test2").await.unwrap();
         assert_eq!(aggregate.value, 45, "Expected sum of increments to be 45");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "streaming")]
+    async fn test_streaming() -> Result<(), crate::event_stores::Error> {
+        use crate::StreamingEventStore;
+
+        let event_store: InMemoryEventStore<State> = Default::default();
+        let stream = event_store
+            .clone()
+            .stream()
+            .await
+            .expect("msg: Failed to create event stream");
+
+        let events_to_send = vec![
+            Event::Increment(10),
+            Event::Decrement(5),
+            Event::Increment(5),
+            Event::Decrement(2),
+        ];
+
+        let events_to_receive = events_to_send.clone();
+        for event in events_to_send {
+            event_store.append("test5", event).await?;
+        }
+
+        let handle = tokio::spawn(async move {
+            use tokio_stream::StreamExt;
+
+            let mut stream = stream.take(4);
+            let mut n = 0;
+            let mut iter = events_to_receive.iter();
+            while let Some(commit) = stream.next().await {
+                let expected_event = iter.next().expect("Got more events than expected");
+                assert_eq!(
+                    commit.id, "test5",
+                    "Expected event ID to be 'test5' at index {}",
+                    n
+                );
+                assert_eq!(
+                    commit.version,
+                    n + 1,
+                    "Expected version to match at index {}",
+                    n
+                );
+                assert!(
+                    commit.diagnostics.is_none(),
+                    "Expected no diagnostics at index {}",
+                    n
+                );
+                assert_eq!(
+                    commit.inner,
+                    expected_event.clone(),
+                    "Expected event at index {} to match",
+                    n
+                );
+                n += 1;
+            }
+            n
+        });
+
+        let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle);
+        match timeout.await {
+            Ok(Ok(n)) => {
+                assert_eq!(n, 4, "Expected 4 events in the stream");
+            }
+            Ok(Err(e)) => {
+                panic!("Stream failed with error: {}", e);
+            }
+            Err(_) => {
+                panic!("Stream did not complete in time");
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "streaming")]
+    async fn test_streaming_after_writes() -> Result<(), crate::event_stores::Error> {
+        use crate::StreamingEventStore;
+
+        let event_store: InMemoryEventStore<State> = Default::default();
+
+        let events_to_send = vec![
+            Event::Increment(10),
+            Event::Decrement(5),
+            Event::Increment(5),
+            Event::Decrement(2),
+        ];
+
+        let events_to_receive = events_to_send.clone();
+        for event in events_to_send {
+            event_store.append("test5", event).await?;
+        }
+
+        let stream = event_store
+            .clone()
+            .stream()
+            .await
+            .expect("msg: Failed to create event stream");
+
+        let handle = tokio::spawn(async move {
+            use tokio_stream::StreamExt;
+
+            let mut stream = stream.take(4);
+            let mut n = 0;
+            let mut iter = events_to_receive.iter();
+            while let Some(commit) = stream.next().await {
+                let expected_event = iter.next().expect("Got more events than expected");
+                assert_eq!(
+                    commit.id, "test5",
+                    "Expected event ID to be 'test5' at index {}",
+                    n
+                );
+                assert_eq!(
+                    commit.version,
+                    n + 1,
+                    "Expected version to match at index {}",
+                    n
+                );
+                assert!(
+                    commit.diagnostics.is_none(),
+                    "Expected no diagnostics at index {}",
+                    n
+                );
+                assert_eq!(
+                    commit.inner,
+                    expected_event.clone(),
+                    "Expected event at index {} to match",
+                    n
+                );
+                n += 1;
+            }
+            n
+        });
+
+        let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle);
+        match timeout.await {
+            Ok(Ok(n)) => {
+                assert_eq!(n, 4, "Expected 4 events in the stream");
+            }
+            Ok(Err(e)) => {
+                panic!("Stream failed with error: {}", e);
+            }
+            Err(_) => {
+                panic!("Stream did not complete in time");
+            }
+        }
 
         Ok(())
     }

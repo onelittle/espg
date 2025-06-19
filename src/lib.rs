@@ -16,7 +16,10 @@ pub use event_stores::{EventStream, StreamingEventStore};
 pub use event_stores::postgres::PostgresEventStream;
 
 #[allow(async_fn_in_trait)]
-pub trait Commands<'a, E: EventStore<T> + 'a, T: Aggregate + Default> {
+pub trait Commands<'a, E: EventStore<T> + 'a, T: Aggregate + Default>
+where
+    Self: 'a,
+{
     fn new(event_store: &'a E) -> Self;
     fn event_store(&'a self) -> &'a E;
 
@@ -97,5 +100,51 @@ mod tests {
         ];
         let aggregate = State::from_slice(&events);
         assert_eq!(aggregate.value, 4);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod test_helper {
+    use tokio::io::AsyncReadExt;
+
+    pub(crate) struct TestDb {
+        pub(crate) name: String,
+        _stream: tokio::net::UnixStream,
+    }
+
+    pub(crate) async fn get_test_database() -> TestDb {
+        // Connect to socket at cwd/tmp/test_manager.sock
+        let path = std::env::var("PGMANAGER_SOCKET").expect("PGMANAGER_SOCKET must be set");
+        let mut stream = tokio::net::UnixStream::connect(path)
+            .await
+            .expect("Failed to connect to test manager socket");
+        let mut buffer = [0; 1024];
+        let read = stream
+            .read(&mut buffer)
+            .await
+            .expect("Failed to read from test manager socket");
+        if read == 0 {
+            panic!("Test manager socket closed unexpectedly");
+        }
+        let response = String::from_utf8_lossy(&buffer);
+        if response.starts_with("OK:") {
+            let db_name = response.strip_prefix("OK:").unwrap().trim().to_string();
+            // Remove embedded null characters
+            let db_name = db_name.replace('\0', "");
+            return TestDb {
+                name: db_name.clone(),
+                _stream: stream,
+            };
+        }
+
+        if response.starts_with("EMPTY:") {
+            panic!(
+                "No databases available: {}",
+                response.strip_prefix("ERROR:").unwrap().trim()
+            );
+        }
+
+        panic!("Unexpected response from test manager: {}", response);
     }
 }
