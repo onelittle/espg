@@ -9,3 +9,13 @@ local_resource(
   },
   labels=["test"],
 )
+
+local_resource(
+  name="test",
+  cmd="cargo nextest run --all-features",
+  env={
+    "PGMANAGER_SOCKET": "pgmanager/tmp/test_manager.sock",
+  },
+  labels=["test"],
+  resource_deps=["pgmanager"],
+)
