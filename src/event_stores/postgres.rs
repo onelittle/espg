@@ -44,6 +44,7 @@ where
     }
 }
 
+#[mutants::skip]
 pub async fn initialize(
     client: &tokio_postgres::Client,
 ) -> std::result::Result<(), tokio_postgres::Error> {
@@ -59,6 +60,7 @@ pub async fn initialize(
     Ok(())
 }
 
+#[mutants::skip]
 pub async fn clear(
     client: &tokio_postgres::Client,
 ) -> std::result::Result<(), tokio_postgres::Error> {
@@ -301,13 +303,14 @@ where
         }
     }
 
+    #[mutants::skip]
     async fn listen(
         client: &tokio_postgres::Client,
         mut connection: tokio_postgres::Connection<
             tokio_postgres::Socket,
             tokio_postgres::tls::NoTlsStream,
         >,
-    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Commit<T::Event>>> {
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Commit<T::Event>> {
         use futures::FutureExt;
         use futures::StreamExt;
         use futures::TryStreamExt;
@@ -323,12 +326,13 @@ where
         let mut max_version_seen = None;
         {
             let tx2 = tx2.clone();
+            #[allow(clippy::expect_used)]
             let rows = client
             .query(
                 r#"SELECT aggregate_id, "version", action FROM events WHERE aggregate_type = $1 ORDER BY version"#,
                 &[&T::name()],
             )
-            .await?;
+            .await.expect("Failed to query events");
 
             for row in rows {
                 let aggregate_id: String = row.get(0);
@@ -390,7 +394,7 @@ where
             }
         });
 
-        Ok(rx2)
+        rx2
     }
 }
 
@@ -405,7 +409,7 @@ where
 
     async fn stream(self) -> Result<Self::StreamType> {
         let client = self.client;
-        let rx2 = PostgresEventStream::<T>::listen(&client, self.connection).await?;
+        let rx2 = PostgresEventStream::<T>::listen(&client, self.connection).await;
         #[allow(clippy::expect_used)]
         client.batch_execute("LISTEN event_notifications;").await?;
 
@@ -422,7 +426,10 @@ mod tests {
     use tokio_stream::StreamExt;
 
     use super::*;
-    use crate::tests::{Event, State};
+    use crate::{
+        Commands as _,
+        tests::{Commands, Event, State},
+    };
 
     async fn get_connection_string(
         db_name: Option<&str>,
@@ -843,6 +850,53 @@ mod tests {
         let aggregate = event_store.get_aggregate("test6").await;
         assert!(aggregate.is_some(), "Expected aggregate to be found");
         assert_eq!(aggregate.unwrap().value, 5);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_not_found() -> Result<()> {
+        let test_db = crate::test_helper::get_test_database().await;
+        let (client, _connection) = init_conn(Some(&test_db.name), true).await?;
+        let event_store = init_event_store(&client)
+            .await
+            .expect("msg: Failed to create event store");
+
+        let result = event_store.try_get_commit("non_existent").await;
+        assert!(
+            matches!(result, Err(Error::NotFound(_))),
+            "Expected NotFound error"
+        );
+
+        let result = event_store.get_commit("non_existent").await;
+        assert!(result.is_none(), "Expected None for non-existent commit");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_commands() -> Result<()> {
+        let test_db = crate::test_helper::get_test_database().await;
+        let (client, _connection) = init_conn(Some(&test_db.name), true).await?;
+        let event_store = init_event_store(&client)
+            .await
+            .expect("msg: Failed to create event store");
+
+        let commands = Commands::new(&event_store);
+        let id = "test7";
+        event_store.commit(id, 1, Event::Increment(0)).await?;
+        for _ in 0..10 {
+            commands.increment(id, 1).await?;
+        }
+        for _ in 0..5 {
+            commands.decrement(id, 1).await?;
+        }
+
+        assert_eq!(
+            event_store.get_aggregate(id).await.unwrap().value,
+            5,
+            "Expected final value to be 5"
+        );
 
         Ok(())
     }

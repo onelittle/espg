@@ -17,6 +17,7 @@ tokio-stream = { version = "0.1.17", features = ["sync"] }
 tokio-util = "0.7.15"
 uuid = { version = "1.17.0", features = ["v4"] }
 deadpool-postgres = { version = "*", optional = true }
+mutants = "0.0.3"
 
 [dev-dependencies]
 deadpool-postgres = "0.14.1"

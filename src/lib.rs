@@ -55,6 +55,8 @@ where
 mod tests {
     use serde::{Deserialize, Serialize};
 
+    use crate::{Commands as _, EventStore, aggregate};
+
     use super::Aggregate;
 
     #[derive(Default, Serialize, Deserialize)]
@@ -84,6 +86,42 @@ mod tests {
         }
     }
 
+    pub struct Commands<'a, E: super::EventStore<State>> {
+        event_store: &'a E,
+    }
+
+    impl<'a, E: super::EventStore<State>> super::Commands<'a, E, State> for Commands<'a, E> {
+        fn new(event_store: &'a E) -> Self {
+            Self { event_store }
+        }
+
+        fn event_store(&'a self) -> &'a E {
+            self.event_store
+        }
+    }
+
+    impl<E: super::EventStore<State>> Commands<'_, E> {
+        pub async fn increment(&self, id: &str, amount: i32) -> super::Result<()> {
+            self.retry_on_version_conflict(|| async {
+                let aggregate = self.event_store.try_get_commit(id).await?;
+                let event = Event::Increment(amount);
+                self.commit(id, aggregate.version + 1, event).await?;
+                Ok(())
+            })
+            .await
+        }
+
+        pub async fn decrement(&self, id: &str, amount: i32) -> super::Result<()> {
+            self.retry_on_version_conflict(|| async {
+                let aggregate = self.event_store.try_get_commit(id).await?;
+                let event = Event::Decrement(amount);
+                self.commit(id, aggregate.version + 1, event).await?;
+                Ok(())
+            })
+            .await
+        }
+    }
+
     #[test]
     fn test_aggregate_reducer() {
         let initial = State { value: 0 };
@@ -102,6 +140,16 @@ mod tests {
         ];
         let aggregate = State::from_slice(&events);
         assert_eq!(aggregate.value, 4);
+    }
+
+    #[test]
+    fn test_snapshot_key() {
+        assert_eq!(State::snapshot_key(), Some("state_snapshot"));
+    }
+
+    #[test]
+    fn test_name() {
+        assert_eq!(State::name(), "espg::tests::State");
     }
 }
 
