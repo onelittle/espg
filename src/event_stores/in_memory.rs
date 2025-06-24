@@ -1,6 +1,6 @@
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+use std::{any::Any, sync::Arc};
 
 use indexmap::IndexMap;
 #[cfg(feature = "streaming")]
@@ -13,7 +13,7 @@ use crate::Aggregate;
 #[cfg(feature = "streaming")]
 use crate::StreamingEventStore;
 
-type CommitTuple<T> = (usize, Vec<T>);
+type CommitTuple = (usize, Vec<Box<dyn Any + Send + Sync>>);
 
 type RwLock<T> = tokio::sync::RwLock<T>;
 
@@ -21,7 +21,7 @@ pub struct InMemoryEventStore<T>
 where
     T: Aggregate,
 {
-    pub(crate) store: Arc<RwLock<IndexMap<String, CommitTuple<T::Event>>>>,
+    pub(crate) store: Arc<RwLock<IndexMap<String, CommitTuple>>>,
     broadcast: tokio::sync::broadcast::Sender<Commit<T::Event>>,
     _rx: Option<tokio::sync::broadcast::Receiver<Commit<T::Event>>>,
     #[cfg(test)]
@@ -64,14 +64,14 @@ where
 impl<T> EventStore<T> for InMemoryEventStore<T>
 where
     T: Aggregate + Default,
-    T::Event: Clone + Send + 'static,
+    T::Event: Clone + Send + Sync + 'static,
 {
     async fn append(&self, id: &str, action: T::Event) -> Result<()> {
         let version = {
             let mut store = self.store.write().await;
             let previous_commit = store.entry(id.to_string()).or_default();
             previous_commit.0 += 1;
-            previous_commit.1.push(action.clone());
+            previous_commit.1.push(Box::new(action.clone()));
             previous_commit.0
         };
         let _commit = Commit {
@@ -96,7 +96,7 @@ where
                 return Err(Error::VersionConflict(version));
             }
             previous_commit.0 += 1;
-            previous_commit.1.push(action.clone());
+            previous_commit.1.push(Box::new(action.clone()));
             previous_commit.0
         };
         let _commit = Commit {
@@ -119,18 +119,24 @@ where
         let stored_commit = store
             .get(id)
             .ok_or(Error::NotFound("Aggregate not found".to_string()))?;
+
+        let inner: Vec<T::Event> = stored_commit
+            .1
+            .iter()
+            .enumerate()
+            .skip_while(|(v, _)| *v < version)
+            .map(|(_, event)| {
+                event
+                    .downcast_ref::<T::Event>()
+                    .expect("Event should be of type T::Event")
+                    .clone()
+            })
+            .collect();
         Ok(Commit {
             id: id.to_string(),
             version: stored_commit.0,
             diagnostics: None,
-            inner: stored_commit
-                .1
-                .iter()
-                .enumerate()
-                .skip_while(|(v, _)| *v < version)
-                .map(|(_, event)| event)
-                .cloned()
-                .collect(),
+            inner,
         })
     }
     #[cfg(feature = "streaming")]
@@ -165,11 +171,15 @@ where
 
         for (id, (_, events)) in store.iter() {
             for (version_index, event) in events.iter().enumerate() {
+                let event = event
+                    .downcast_ref::<T::Event>()
+                    .expect("Event should be of type T::Event")
+                    .clone();
                 let version = version_index + 1; // Versioning starts from 1
                 let commit = Commit {
                     id: id.clone(),
                     version,
-                    inner: event.clone(),
+                    inner: event,
                     diagnostics: None,
                 };
                 if tx1.send(commit).is_err() {
