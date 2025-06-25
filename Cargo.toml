@@ -18,6 +18,8 @@ tokio-util = "0.7.15"
 uuid = { version = "1.17.0", features = ["v4"] }
 deadpool-postgres = { version = "*", optional = true }
 mutants = "0.0.3"
+async-trait = "0.1.88"
+dyn-clone = "1.0.19"
 
 [dev-dependencies]
 deadpool-postgres = "0.14.1"

@@ -8,13 +8,14 @@ pub(crate) mod sql_helpers;
 mod streaming;
 
 use crate::{Aggregate, Id};
+use async_trait::async_trait;
 #[cfg(feature = "streaming")]
 use futures::Stream;
 #[cfg(feature = "inmem")]
 pub use in_memory::InMemoryEventStore;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresEventStore;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 #[cfg(feature = "streaming")]
 pub use streaming::EventStream;
 
@@ -62,66 +63,72 @@ pub struct Commit<T> {
     pub diagnostics: Option<Diagnostics>,
 }
 
-#[allow(async_fn_in_trait)]
-pub trait EventStore<T: Aggregate + Default> {
-    async fn append(&self, id: &Id<T>, event: T::Event) -> Result<()>;
-    async fn commit(&self, id: &Id<T>, version: usize, event: T::Event) -> Result<()>;
-    async fn try_get_events_since(
+#[async_trait]
+pub trait EventStore {
+    async fn append<X: Aggregate>(&self, id: &Id<X>, event: X::Event) -> Result<()>;
+    async fn commit<X: Aggregate + Serialize>(
         &self,
-        id: &Id<T>,
+        id: &Id<X>,
         version: usize,
-    ) -> Result<Commit<Vec<T::Event>>>;
-    async fn try_get_events(&self, id: &Id<T>) -> Result<Commit<Vec<T::Event>>> {
+        event: X::Event,
+    ) -> Result<()>;
+    async fn try_get_events_since<X: Aggregate>(
+        &self,
+        id: &Id<X>,
+        version: usize,
+    ) -> Result<Commit<Vec<X::Event>>>;
+    async fn try_get_events<X: Aggregate>(&self, id: &Id<X>) -> Result<Commit<Vec<X::Event>>> {
         self.try_get_events_since(id, 0).await
     }
-    async fn get_events(&self, id: &Id<T>) -> Option<Commit<Vec<T::Event>>> {
+    async fn get_events<X: Aggregate>(&self, id: &Id<X>) -> Option<Commit<Vec<X::Event>>> {
         match self.try_get_events(id).await {
             Ok(events) => Some(events),
             Err(Error::NotFound(_)) => None,
             Err(_) => None,
         }
     }
-    async fn try_get_commit(&self, id: &Id<T>) -> Result<Commit<T>> {
+    async fn try_get_commit<X: Aggregate>(&self, id: &Id<X>) -> Result<Commit<X>> {
         let events = self.try_get_events(id).await?;
         let id = id.to_string();
         Ok(Commit {
             id,
             version: events.version,
-            inner: T::from_slice(&events.inner),
+            inner: X::from_slice(&events.inner),
             diagnostics: None,
         })
     }
-    async fn get_commit(&self, id: &Id<T>) -> Option<Commit<T>> {
+    async fn get_commit<X: Aggregate>(&self, id: &Id<X>) -> Option<Commit<X>> {
         match self.try_get_commit(id).await {
             Ok(commit) => Some(commit),
             Err(Error::NotFound(_)) => None,
             Err(_) => None,
         }
     }
-    async fn try_get_aggregate(&self, id: &Id<T>) -> Result<T> {
+    async fn try_get_aggregate<X: Aggregate + Default>(&self, id: &Id<X>) -> Result<X> {
         self.try_get_commit(id).await.map(|r| r.inner)
     }
-    async fn get_aggregate(&self, id: &Id<T>) -> Option<T> {
+    async fn get_aggregate<X: Aggregate + Default>(&self, id: &Id<X>) -> Option<X> {
         self.get_commit(id).await.map(|r| r.inner)
     }
     #[allow(unused_variables)]
-    async fn store_snapshot(&self, id: &Id<T>) -> Result<()> {
+    async fn store_snapshot<X: Aggregate + Serialize>(&self, id: &Id<X>) -> Result<()> {
         Ok(())
     }
     #[allow(unused_variables)]
-    async fn load_snapshot(&self, id: &Id<T>) -> Result<Option<Commit<T>>> {
+    async fn load_snapshot<X: Aggregate + DeserializeOwned>(
+        &self,
+        id: &Id<X>,
+    ) -> Result<Option<Commit<X>>> {
         Ok(None)
     }
 
     #[cfg(feature = "streaming")]
-    async fn transmit(&self, event: Commit<T::Event>) -> Result<()>;
+    async fn transmit<X: Aggregate>(&self, event: Commit<X::Event>) -> Result<()>;
 }
 
 #[cfg(feature = "streaming")]
 #[allow(async_fn_in_trait)]
-pub trait StreamingEventStore<'a, T: Aggregate + Default> {
-    type StreamType: Stream<Item = Commit<T::Event>>;
-
+pub trait StreamingEventStore {
     #[cfg(feature = "streaming")]
-    async fn stream(self) -> Result<Self::StreamType>;
+    async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = Commit<X::Event>>>;
 }

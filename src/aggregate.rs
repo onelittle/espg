@@ -1,6 +1,14 @@
 use std::marker::PhantomData;
 
+use serde::{Serialize, de::DeserializeOwned};
+
 pub struct Id<T: Aggregate>(pub String, PhantomData<T>);
+
+impl<T: Aggregate> Clone for Id<T> {
+    fn clone(&self) -> Self {
+        Id(self.0.clone(), PhantomData)
+    }
+}
 
 impl<T: Aggregate> std::fmt::Display for Id<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -8,8 +16,11 @@ impl<T: Aggregate> std::fmt::Display for Id<T> {
     }
 }
 
-pub trait Aggregate {
-    type Event;
+pub trait Aggregate
+where
+    Self: Default + Serialize + DeserializeOwned + Send + Sync,
+{
+    type Event: Clone + Send + Sync + 'static + DeserializeOwned + serde::Serialize;
 
     // TODO: make this a const fn when stable
     fn name() -> &'static str {

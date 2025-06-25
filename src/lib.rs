@@ -1,7 +1,9 @@
 mod aggregate;
+mod commands;
 pub mod event_stores;
 
 pub use aggregate::{Aggregate, Id};
+pub use commands::Commands;
 #[cfg(feature = "inmem")]
 pub use event_stores::InMemoryEventStore;
 #[cfg(feature = "postgres")]
@@ -15,47 +17,11 @@ pub use event_stores::{EventStream, StreamingEventStore};
 #[cfg(feature = "postgres")]
 pub use event_stores::postgres::PostgresEventStream;
 
-#[allow(async_fn_in_trait)]
-pub trait Commands<'a, E, T>
-where
-    Self: 'a,
-    E: EventStore<T> + 'a,
-    T: Aggregate + Default + 'a,
-{
-    fn new(event_store: &'a E) -> Self;
-    fn event_store(&'a self) -> &'a E;
-
-    async fn commit(&'a self, id: &Id<T>, version: usize, event: T::Event) -> Result<()> {
-        self.event_store().commit(id, version, event).await
-    }
-
-    async fn append(&'a self, id: &Id<T>, event: T::Event) -> Result<()> {
-        self.event_store().append(id, event).await
-    }
-
-    async fn retry_on_version_conflict<'b, F, Fut, R>(&'a self, mut f: F) -> Result<()>
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<R>> + 'b,
-        'a: 'b,
-    {
-        loop {
-            match f().await {
-                Ok(_) => return Ok(()),
-                Err(Error::VersionConflict(_)) => {
-                    eprintln!("Version conflict occurred, retrying...");
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde::{Deserialize, Serialize};
 
-    use crate::{Commands as _, aggregate::Id};
+    use crate::{Commands as _, EventStore, aggregate::Id};
 
     use super::Aggregate;
 
@@ -86,21 +52,23 @@ mod tests {
         }
     }
 
-    pub struct Commands<'a, E: super::EventStore<State>> {
+    pub struct Commands<'a, E: super::EventStore> {
         event_store: &'a E,
     }
 
-    impl<'a, E: super::EventStore<State>> super::Commands<'a, E, State> for Commands<'a, E> {
-        fn new(event_store: &'a E) -> Self {
+    impl<'a, E: super::EventStore> Commands<'a, E> {
+        pub fn new(event_store: &'a E) -> Self {
             Self { event_store }
         }
+    }
 
-        fn event_store(&'a self) -> &'a E {
+    impl<'a, E: super::EventStore> super::Commands<'a> for Commands<'a, E> {
+        fn event_store(&'a self) -> &'a impl EventStore {
             self.event_store
         }
     }
 
-    impl<E: super::EventStore<State>> Commands<'_, E> {
+    impl<E: super::EventStore + Sync> Commands<'_, E> {
         pub async fn increment(&self, id: &Id<State>, amount: i32) -> super::Result<()> {
             self.retry_on_version_conflict(|| async {
                 let aggregate = self.event_store.try_get_commit(id).await?;

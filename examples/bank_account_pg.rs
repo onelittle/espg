@@ -1,7 +1,9 @@
+use async_trait::async_trait;
 use espg::{
-    Aggregate, Commands as _, Commit, EventStore, EventStream, Id, PostgresEventStore,
-    PostgresEventStream, StreamingEventStore,
+    Aggregate, Commands as _, Commit, EventStore, Id, PostgresEventStore, PostgresEventStream,
+    StreamingEventStore,
 };
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::NoTls;
 use tokio_stream::StreamExt;
@@ -54,21 +56,22 @@ fn update_stats_display(active_accounts: usize, total_balance: i64) {
     );
 }
 
-struct Commands<'a, E: EventStore<AccountState>> {
+struct Commands<'a, E: EventStore> {
     event_store: &'a E,
 }
 
-impl<'a, E: EventStore<AccountState>> espg::Commands<'a, E, AccountState> for Commands<'a, E> {
-    fn new(event_store: &'a E) -> Self {
-        Self { event_store }
-    }
-
-    fn event_store(&'a self) -> &'a E {
+#[async_trait]
+impl<'a, E: EventStore> espg::Commands<'a> for Commands<'a, E> {
+    fn event_store(&'a self) -> &'a impl EventStore {
         self.event_store
     }
 }
 
-impl<'a, E: EventStore<AccountState>> Commands<'a, E> {
+impl<'a, E: EventStore + Sync> Commands<'a, E> {
+    fn new(event_store: &'a E) -> Self {
+        Self { event_store }
+    }
+
     async fn open_account(&'a self) -> Result<Id<AccountState>, espg::Error> {
         let id = AccountState::id(uuid::Uuid::new_v4().to_string());
         self.commit(&id, 1, Event::AccountOpened).await?;
@@ -104,15 +107,16 @@ impl<'a, E: EventStore<AccountState>> Commands<'a, E> {
 }
 
 #[allow(clippy::expect_used)]
-async fn init_event_stream()
--> EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<Event>>, tokio_postgres::Client> {
+async fn init_event_stream() -> impl Stream<Item = Commit<Event>> {
     let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
     let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
         .await
         .expect("Failed to connect to Postgres");
 
     let es = PostgresEventStream::<AccountState>::new(client, connection).await;
-    es.stream().await.expect("Failed to create event stream")
+    es.stream::<AccountState>()
+        .await
+        .expect("Failed to create event stream")
 }
 
 #[tokio::main]
@@ -133,8 +137,7 @@ async fn main() -> espg::Result<()> {
 
     let stream = init_event_stream().await;
 
-    let event_store: PostgresEventStore<AccountState, tokio_postgres::Client> =
-        PostgresEventStore::new(&client);
+    let event_store = PostgresEventStore::new(&client);
     let commands = Commands::new(&event_store);
     let id = commands.open_account().await?;
     commands.deposit_money(&id, 100).await?;
@@ -144,9 +147,9 @@ async fn main() -> espg::Result<()> {
     commands.close_account(&id2).await?;
 
     let thread_b = {
+        let id = id.clone();
         tokio::spawn(async move {
-            let event_store: PostgresEventStore<'_, AccountState, tokio_postgres::Client> =
-                PostgresEventStore::new(&client);
+            let event_store = PostgresEventStore::new(&client);
             let commands = Commands::new(&event_store);
             commands.deposit_money(&id, 100).await?;
             commands.withdraw_money(&id, 50).await?;

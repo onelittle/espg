@@ -5,38 +5,37 @@ use crate::{
 };
 #[cfg(feature = "streaming")]
 use crate::{EventStream, StreamingEventStore};
+use async_trait::async_trait;
+#[cfg(feature = "streaming")]
+use futures::Stream;
 #[cfg(feature = "streaming")]
 use futures_channel::mpsc;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_postgres::{GenericClient, types::Json};
 
-pub struct PostgresEventStore<'a, T, Db: GenericClient> {
+pub struct PostgresEventStore<'a, Db: GenericClient> {
     client: &'a Db,
-    aggregate_type: std::marker::PhantomData<T>,
     snapshot_interval: usize,
 }
 
-impl<'a, T, Db> PostgresEventStore<'a, T, Db>
+impl<'a, Db> PostgresEventStore<'a, Db>
 where
-    T: Aggregate,
     Db: GenericClient,
 {
-    pub fn new(client: &'a Db) -> PostgresEventStore<'a, T, Db> {
+    pub fn new(client: &'a Db) -> PostgresEventStore<'a, Db> {
         PostgresEventStore {
             client,
-            aggregate_type: std::marker::PhantomData,
             snapshot_interval: 10,
         }
     }
 }
 
 #[cfg(feature = "deadpool")]
-impl<'a, 'b, T> From<&'a deadpool_postgres::ClientWrapper>
-    for PostgresEventStore<'b, T, tokio_postgres::Client>
+impl<'a, 'b> From<&'a deadpool_postgres::ClientWrapper>
+    for PostgresEventStore<'b, tokio_postgres::Client>
 where
     'a: 'b,
-    T: Aggregate,
 {
     fn from(client: &'a deadpool_postgres::ClientWrapper) -> Self {
         let client = &**client;
@@ -75,21 +74,18 @@ pub async fn clear(
     Ok(())
 }
 
-impl<T, Db: GenericClient> EventStore<T> for PostgresEventStore<'_, T, Db>
-where
-    T: Aggregate + Default + Serialize + DeserializeOwned,
-    T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
-{
-    async fn try_get_events_since(
+#[async_trait]
+impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
+    async fn try_get_events_since<X: Aggregate>(
         &self,
-        id: &Id<T>,
+        id: &Id<X>,
         version: usize,
-    ) -> Result<super::Commit<Vec<<T as Aggregate>::Event>>> {
+    ) -> Result<super::Commit<Vec<X::Event>>> {
         let rows = self
             .client
             .query(
                 "SELECT version, action FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version > $3 ORDER BY version",
-                &[&id.0, &T::name(), &(version as i32)],
+                &[&id.0, &X::name(), &(version as i32)],
             )
             .await?;
 
@@ -102,7 +98,7 @@ where
             return Err(Error::NotFound("No events found".to_string()));
         }
 
-        let mut events: Vec<T::Event> = Vec::with_capacity(rows.len());
+        let mut events: Vec<X::Event> = Vec::with_capacity(rows.len());
         for row in rows {
             let action: Value = row.get(1);
             events.push(serde_json::from_value(action)?);
@@ -116,7 +112,7 @@ where
         })
     }
 
-    async fn try_get_commit(&self, id: &Id<T>) -> Result<Commit<T>> {
+    async fn try_get_commit<X: Aggregate>(&self, id: &Id<X>) -> Result<Commit<X>> {
         match self.load_snapshot(id).await? {
             Some(snapshot_commit) => {
                 let events = self
@@ -129,7 +125,7 @@ where
                         loaded_events: events.inner.len(),
                         snapshotted: true,
                     }),
-                    inner: events.inner.iter().fold(snapshot_commit.inner, T::reduce),
+                    inner: events.inner.iter().fold(snapshot_commit.inner, X::reduce),
                 })
             }
             None => {
@@ -141,18 +137,23 @@ where
                         loaded_events: events.inner.len(),
                         snapshotted: false,
                     }),
-                    inner: T::from_slice(&events.inner),
+                    inner: X::from_slice(&events.inner),
                 })
             }
         }
     }
 
-    async fn commit(&self, id: &Id<T>, version: usize, action: T::Event) -> Result<()> {
+    async fn commit<X: Aggregate>(
+        &self,
+        id: &Id<X>,
+        version: usize,
+        action: X::Event,
+    ) -> Result<()> {
         let json_action: Value = serde_json::to_value(action.clone())?;
         self.client
             .execute(
                 "INSERT INTO events (aggregate_id, aggregate_type, version, action) VALUES ($1, $2, $3, $4)",
-                &[&id.0, &T::name(), &(version as i32), &json_action],
+                &[&id.0, &X::name(), &(version as i32), &json_action],
             )
             .await
             .map_err(|e| {
@@ -164,11 +165,11 @@ where
             })?;
 
         if version % self.snapshot_interval == 0 {
-            self.store_snapshot(id).await?;
+            self.store_snapshot::<X>(id).await?;
         }
 
         #[cfg(feature = "streaming")]
-        self.transmit(Commit {
+        self.transmit::<X>(Commit {
             id: id.to_string(),
             version,
             diagnostics: None,
@@ -180,8 +181,8 @@ where
         Ok(())
     }
 
-    async fn store_snapshot(&self, id: &Id<T>) -> Result<()> {
-        if let Some(key) = T::snapshot_key() {
+    async fn store_snapshot<X: Aggregate>(&self, id: &Id<X>) -> Result<()> {
+        if let Some(key) = X::snapshot_key() {
             let Commit {
                 id: _,
                 version,
@@ -196,26 +197,26 @@ where
                     VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (aggregate_id, aggregate_type, key) DO UPDATE SET version = EXCLUDED.version, snapshot = EXCLUDED.snapshot
             "#,
-                    &[&id.0, &T::name(), &key, &(version as i32), &snapshot],
+                    &[&id.0, &X::name(), &key, &(version as i32), &snapshot],
                 )
                 .await?;
         }
         Ok(())
     }
 
-    async fn load_snapshot(&self, id: &Id<T>) -> Result<Option<Commit<T>>> {
-        if let Some(key) = T::snapshot_key() {
+    async fn load_snapshot<X: Aggregate>(&self, id: &Id<X>) -> Result<Option<Commit<X>>> {
+        if let Some(key) = X::snapshot_key() {
             let row = self
                 .client
                 .query_opt(
                     "SELECT version, snapshot FROM snapshots WHERE aggregate_id = $1 AND aggregate_type = $2 AND key = $3",
-                    &[&id.0, &T::name(), &key],
+                    &[&id.0, &X::name(), &key],
                 )
                 .await?;
 
             if let Some(row) = row {
                 let version = row.get::<'_, _, i32>(0) as usize;
-                let snapshot_col: Json<T> = row.get(1);
+                let snapshot_col: Json<X> = row.get(1);
                 let inner = snapshot_col.0;
                 return Ok(Some(Commit {
                     id: id.to_string(),
@@ -231,7 +232,7 @@ where
         Ok(None)
     }
 
-    async fn append(&self, id: &Id<T>, action: T::Event) -> Result<()> {
+    async fn append<X: Aggregate>(&self, id: &Id<X>, action: X::Event) -> Result<()> {
         let mut version = {
             match self.try_get_commit(id).await {
                 Ok(commit) => commit.version + 1,
@@ -261,7 +262,7 @@ where
     }
 
     #[cfg(feature = "streaming")]
-    async fn transmit(&self, commit: Commit<<T as Aggregate>::Event>) -> Result<()> {
+    async fn transmit<X: Aggregate>(&self, commit: Commit<X::Event>) -> Result<()> {
         // Execute listen/notify
         self.client
             .execute(
@@ -399,17 +400,10 @@ where
 }
 
 #[cfg(feature = "streaming")]
-impl<'a, T: Aggregate + Default + Serialize + DeserializeOwned> StreamingEventStore<'a, T>
-    for PostgresEventStream<T>
-where
-    T::Event: Clone + Serialize + DeserializeOwned + Send + 'static,
-{
-    type StreamType =
-        EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<T::Event>>, tokio_postgres::Client>;
-
-    async fn stream(self) -> Result<Self::StreamType> {
+impl<T: Aggregate> StreamingEventStore for PostgresEventStream<T> {
+    async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = Commit<X::Event>>> {
         let client = self.client;
-        let rx2 = PostgresEventStream::<T>::listen(&client, self.connection).await;
+        let rx2 = PostgresEventStream::<X>::listen(&client, self.connection).await;
         #[allow(clippy::expect_used)]
         client.batch_execute("LISTEN event_notifications;").await?;
 
@@ -421,15 +415,12 @@ where
 #[allow(clippy::expect_used)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use tokio_postgres::{Socket, Transaction};
+    use tokio_postgres::Socket;
     #[cfg(feature = "streaming")]
     use tokio_stream::StreamExt;
 
     use super::*;
-    use crate::{
-        Commands as _,
-        tests::{Commands, Event, State},
-    };
+    use crate::tests::{Commands, Event, State};
 
     async fn get_connection_string(
         db_name: Option<&str>,
@@ -506,10 +497,7 @@ mod tests {
 
     async fn init_event_store<'a, 'b>(
         client: &'a tokio_postgres::Client,
-    ) -> std::result::Result<
-        PostgresEventStore<'b, State, tokio_postgres::Client>,
-        tokio_postgres::Error,
-    >
+    ) -> std::result::Result<PostgresEventStore<'b, tokio_postgres::Client>, tokio_postgres::Error>
     where
         'a: 'b,
     {
@@ -528,13 +516,13 @@ mod tests {
     #[cfg(feature = "streaming")]
     async fn init_event_stream(
         db_name: Option<&str>,
-    ) -> std::result::Result<
-        EventStream<tokio::sync::mpsc::UnboundedReceiver<Commit<Event>>, tokio_postgres::Client>,
-        tokio_postgres::Error,
-    > {
+    ) -> std::result::Result<impl Stream<Item = Commit<Event>> + use<>, tokio_postgres::Error> {
         if let (client, Some(connection)) = init_conn(db_name, false).await? {
             let es = PostgresEventStream::<State>::new(client, connection).await;
-            Ok(es.stream().await.expect("Failed to create event stream"))
+            Ok(es
+                .stream::<State>()
+                .await
+                .expect("Failed to create event stream"))
         } else {
             panic!("Failed to initialize Postgres connection");
         }
@@ -576,7 +564,7 @@ mod tests {
             .await
             .expect("msg: Failed to create event store");
 
-        let id = Aggregate::id("missing");
+        let id = State::id("missing");
         let aggregate = event_store.get_aggregate(&id).await;
         assert!(aggregate.is_none(), "Expected None for missing aggregate");
         let events = event_store.try_get_events(&id).await;
@@ -623,8 +611,7 @@ mod tests {
         assert_eq!(commit.inner.value, 10);
 
         let db_transaction = client.transaction().await?;
-        let transaction: PostgresEventStore<State, Transaction> =
-            PostgresEventStore::new(&db_transaction);
+        let transaction = PostgresEventStore::new(&db_transaction);
         transaction.append(&id, Event::Decrement(4)).await?;
         db_transaction.rollback().await?;
 
