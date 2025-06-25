@@ -1,4 +1,4 @@
-use espg::{Aggregate, EventStore, InMemoryEventStore};
+use espg::{Aggregate, EventStore, Id, InMemoryEventStore};
 
 #[derive(Default)]
 struct AccountState {
@@ -50,23 +50,31 @@ impl<'a> Commands<'a> {
         Commands { event_store }
     }
 
-    async fn open_account(&mut self, id: &str) -> Result<(), espg::Error> {
+    async fn open_account(&mut self, id: &Id<AccountState>) -> Result<(), espg::Error> {
         self.event_store.append(id, Event::AccountOpened).await
     }
 
-    async fn deposit_money(&mut self, id: &str, amount: i64) -> Result<(), espg::Error> {
+    async fn deposit_money(
+        &mut self,
+        id: &Id<AccountState>,
+        amount: i64,
+    ) -> Result<(), espg::Error> {
         self.event_store
             .append(id, Event::MoneyDeposited(amount))
             .await
     }
 
-    async fn withdraw_money(&mut self, id: &str, amount: i64) -> Result<(), espg::Error> {
+    async fn withdraw_money(
+        &mut self,
+        id: &Id<AccountState>,
+        amount: i64,
+    ) -> Result<(), espg::Error> {
         self.event_store
             .append(id, Event::MoneyWithdrawn(amount))
             .await
     }
 
-    async fn close_account(&mut self, id: &str) -> Result<(), espg::Error> {
+    async fn close_account(&mut self, id: &Id<AccountState>) -> Result<(), espg::Error> {
         self.event_store.append(id, Event::AccountClosed).await
     }
 }
@@ -87,7 +95,7 @@ async fn main() {
         let mut event_store_clone = event_store.clone();
         let handle = tokio::spawn(async move {
             let mut commands = Commands::new(&mut event_store_clone);
-            let account_id = format!("account{}", i + 100_000);
+            let account_id = AccountState::id(format!("account{}", i + 100_000));
             commands.open_account(&account_id).await.unwrap();
             for _ in 0..1_000_000 {
                 commands.deposit_money(&account_id, 100).await.unwrap();
@@ -113,8 +121,9 @@ async fn main() {
     for i in 0..8 {
         let event_store_clone = event_store.clone();
         let handle = tokio::spawn(async move {
+            let id = AccountState::id(format!("account{}", i + 100_000));
             let state = event_store_clone
-                .get_commit(&format!("account{}", i + 100_000))
+                .get_commit(&id)
                 .await
                 .expect("Failed to get account state");
             (state.inner.active, state.inner.balance)

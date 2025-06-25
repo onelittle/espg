@@ -9,9 +9,9 @@ use tokio::sync::broadcast::error::SendError;
 use tokio_stream::wrappers::{UnboundedReceiverStream, errors::BroadcastStreamRecvError};
 
 use super::{Commit, Error, EventStore, Result};
-use crate::Aggregate;
 #[cfg(feature = "streaming")]
 use crate::StreamingEventStore;
+use crate::{Aggregate, Id};
 
 type CommitTuple = (usize, Vec<Box<dyn Any + Send + Sync>>);
 
@@ -66,7 +66,7 @@ where
     T: Aggregate + Default,
     T::Event: Clone + Send + Sync + 'static,
 {
-    async fn append(&self, id: &str, action: T::Event) -> Result<()> {
+    async fn append(&self, id: &Id<T>, action: T::Event) -> Result<()> {
         let version = {
             let mut store = self.store.write().await;
             let previous_commit = store.entry(id.to_string()).or_default();
@@ -85,7 +85,7 @@ where
         Ok(())
     }
 
-    async fn commit(&self, id: &str, version: usize, action: T::Event) -> Result<()> {
+    async fn commit(&self, id: &Id<T>, version: usize, action: T::Event) -> Result<()> {
         let version = {
             let mut store = self.store.write().await;
             let previous_commit = store.entry(id.to_string()).or_default();
@@ -112,12 +112,12 @@ where
 
     async fn try_get_events_since(
         &self,
-        id: &str,
+        id: &Id<T>,
         version: usize,
     ) -> Result<Commit<Vec<T::Event>>> {
         let store = self.store.read().await;
         let stored_commit = store
-            .get(id)
+            .get(&id.0)
             .ok_or(Error::NotFound("Aggregate not found".to_string()))?;
 
         let inner: Vec<T::Event> = stored_commit
@@ -215,8 +215,8 @@ where
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use crate::EventStore;
     use crate::tests::{Event, State};
+    use crate::{Aggregate as _, EventStore};
 
     use super::InMemoryEventStore;
 
@@ -224,16 +224,17 @@ mod tests {
     async fn test_in_memory_commands() -> Result<(), crate::event_stores::Error> {
         let event_store: InMemoryEventStore<State> = Default::default();
 
-        event_store.append("test1", Event::Increment(10)).await?;
-        event_store.append("test1", Event::Decrement(4)).await?;
+        let id = State::id("test1");
+        event_store.append(&id, Event::Increment(10)).await?;
+        event_store.append(&id, Event::Decrement(4)).await?;
         let aggregate = event_store
-            .get_aggregate("test1")
+            .get_aggregate(&id)
             .await
             .expect("Aggregate not found");
         assert_eq!(aggregate.value, 6);
-        event_store.append("test1", Event::Increment(3)).await?;
+        event_store.append(&id, Event::Increment(3)).await?;
         let aggregate = event_store
-            .get_aggregate("test1")
+            .get_aggregate(&id)
             .await
             .expect("Aggregate not found");
         assert_eq!(aggregate.value, 9);
@@ -255,7 +256,8 @@ mod tests {
             .map(|i| {
                 let store = event_store.clone();
                 tokio::spawn(async move {
-                    store.append("test2", Event::Increment(i)).await.unwrap();
+                    let id = State::id("test2");
+                    store.append(&id, Event::Increment(i)).await.unwrap();
                 })
             })
             .collect();
@@ -264,7 +266,8 @@ mod tests {
             handle.await.expect("Thread panicked");
         }
 
-        let aggregate = event_store.get_aggregate("test2").await.unwrap();
+        let id = State::id("test2");
+        let aggregate = event_store.get_aggregate(&id).await.unwrap();
         assert_eq!(aggregate.value, 45, "Expected sum of increments to be 45");
 
         Ok(())
@@ -290,8 +293,9 @@ mod tests {
         ];
 
         let events_to_receive = events_to_send.clone();
+        let id = State::id("test5");
         for event in events_to_send {
-            event_store.append("test5", event).await?;
+            event_store.append(&id, event).await?;
         }
 
         let handle = tokio::spawn(async move {
@@ -360,8 +364,9 @@ mod tests {
         ];
 
         let events_to_receive = events_to_send.clone();
+        let id = State::id("test5");
         for event in events_to_send {
-            event_store.append("test5", event).await?;
+            event_store.append(&id, event).await?;
         }
 
         let stream = event_store

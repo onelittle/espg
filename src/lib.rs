@@ -1,7 +1,7 @@
 mod aggregate;
 pub mod event_stores;
 
-pub use aggregate::Aggregate;
+pub use aggregate::{Aggregate, Id};
 #[cfg(feature = "inmem")]
 pub use event_stores::InMemoryEventStore;
 #[cfg(feature = "postgres")]
@@ -25,11 +25,11 @@ where
     fn new(event_store: &'a E) -> Self;
     fn event_store(&'a self) -> &'a E;
 
-    async fn commit(&'a self, id: &str, version: usize, event: T::Event) -> Result<()> {
+    async fn commit(&'a self, id: &Id<T>, version: usize, event: T::Event) -> Result<()> {
         self.event_store().commit(id, version, event).await
     }
 
-    async fn append(&'a self, id: &str, event: T::Event) -> Result<()> {
+    async fn append(&'a self, id: &Id<T>, event: T::Event) -> Result<()> {
         self.event_store().append(id, event).await
     }
 
@@ -55,7 +55,7 @@ where
 mod tests {
     use serde::{Deserialize, Serialize};
 
-    use crate::{Commands as _, EventStore, aggregate};
+    use crate::{Commands as _, aggregate::Id};
 
     use super::Aggregate;
 
@@ -101,7 +101,7 @@ mod tests {
     }
 
     impl<E: super::EventStore<State>> Commands<'_, E> {
-        pub async fn increment(&self, id: &str, amount: i32) -> super::Result<()> {
+        pub async fn increment(&self, id: &Id<State>, amount: i32) -> super::Result<()> {
             self.retry_on_version_conflict(|| async {
                 let aggregate = self.event_store.try_get_commit(id).await?;
                 let event = Event::Increment(amount);
@@ -111,7 +111,7 @@ mod tests {
             .await
         }
 
-        pub async fn decrement(&self, id: &str, amount: i32) -> super::Result<()> {
+        pub async fn decrement(&self, id: &Id<State>, amount: i32) -> super::Result<()> {
             self.retry_on_version_conflict(|| async {
                 let aggregate = self.event_store.try_get_commit(id).await?;
                 let event = Event::Decrement(amount);

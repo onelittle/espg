@@ -1,6 +1,6 @@
 use super::{Error, Result};
 use crate::{
-    Aggregate, EventStore,
+    Aggregate, EventStore, Id,
     event_stores::{Commit, Diagnostics},
 };
 #[cfg(feature = "streaming")]
@@ -82,14 +82,14 @@ where
 {
     async fn try_get_events_since(
         &self,
-        id: &str,
+        id: &Id<T>,
         version: usize,
     ) -> Result<super::Commit<Vec<<T as Aggregate>::Event>>> {
         let rows = self
             .client
             .query(
                 "SELECT version, action FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version > $3 ORDER BY version",
-                &[&id, &T::name(), &(version as i32)],
+                &[&id.0, &T::name(), &(version as i32)],
             )
             .await?;
 
@@ -116,7 +116,7 @@ where
         })
     }
 
-    async fn try_get_commit(&self, id: &str) -> Result<Commit<T>> {
+    async fn try_get_commit(&self, id: &Id<T>) -> Result<Commit<T>> {
         match self.load_snapshot(id).await? {
             Some(snapshot_commit) => {
                 let events = self
@@ -147,12 +147,12 @@ where
         }
     }
 
-    async fn commit(&self, id: &str, version: usize, action: T::Event) -> Result<()> {
+    async fn commit(&self, id: &Id<T>, version: usize, action: T::Event) -> Result<()> {
         let json_action: Value = serde_json::to_value(action.clone())?;
         self.client
             .execute(
                 "INSERT INTO events (aggregate_id, aggregate_type, version, action) VALUES ($1, $2, $3, $4)",
-                &[&id, &T::name(), &(version as i32), &json_action],
+                &[&id.0, &T::name(), &(version as i32), &json_action],
             )
             .await
             .map_err(|e| {
@@ -175,12 +175,12 @@ where
             inner: action,
         })
         .await?;
-        eprintln!("Committed event for {}: version {}", id, version);
+        eprintln!("Committed event for {}: version {}", id.0, version);
 
         Ok(())
     }
 
-    async fn store_snapshot(&self, id: &str) -> Result<()> {
+    async fn store_snapshot(&self, id: &Id<T>) -> Result<()> {
         if let Some(key) = T::snapshot_key() {
             let Commit {
                 id: _,
@@ -196,20 +196,20 @@ where
                     VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (aggregate_id, aggregate_type, key) DO UPDATE SET version = EXCLUDED.version, snapshot = EXCLUDED.snapshot
             "#,
-                    &[&id, &T::name(), &key, &(version as i32), &snapshot],
+                    &[&id.0, &T::name(), &key, &(version as i32), &snapshot],
                 )
                 .await?;
         }
         Ok(())
     }
 
-    async fn load_snapshot(&self, id: &str) -> Result<Option<Commit<T>>> {
+    async fn load_snapshot(&self, id: &Id<T>) -> Result<Option<Commit<T>>> {
         if let Some(key) = T::snapshot_key() {
             let row = self
                 .client
                 .query_opt(
                     "SELECT version, snapshot FROM snapshots WHERE aggregate_id = $1 AND aggregate_type = $2 AND key = $3",
-                    &[&id, &T::name(), &key],
+                    &[&id.0, &T::name(), &key],
                 )
                 .await?;
 
@@ -231,7 +231,7 @@ where
         Ok(None)
     }
 
-    async fn append(&self, id: &str, action: T::Event) -> Result<()> {
+    async fn append(&self, id: &Id<T>, action: T::Event) -> Result<()> {
         let mut version = {
             match self.try_get_commit(id).await {
                 Ok(commit) => commit.version + 1,
@@ -550,16 +550,17 @@ mod tests {
         let db_transaction = client.transaction().await?;
         let transaction = PostgresEventStore::new(&db_transaction);
 
-        transaction.append("test1", Event::Increment(10)).await?;
-        transaction.append("test1", Event::Decrement(4)).await?;
+        let id = State::id("test1");
+        transaction.append(&id, Event::Increment(10)).await?;
+        transaction.append(&id, Event::Decrement(4)).await?;
         let aggregate: State = transaction
-            .get_aggregate("test1")
+            .get_aggregate(&id)
             .await
             .expect("Aggregate not found");
         assert_eq!(aggregate.value, 6);
-        transaction.append("test1", Event::Increment(3)).await?;
+        transaction.append(&id, Event::Increment(3)).await?;
         let aggregate = transaction
-            .get_aggregate("test1")
+            .get_aggregate(&id)
             .await
             .expect("Aggregate not found");
         assert_eq!(aggregate.value, 9);
@@ -575,9 +576,10 @@ mod tests {
             .await
             .expect("msg: Failed to create event store");
 
-        let aggregate = event_store.get_aggregate("missing").await;
+        let id = Aggregate::id("missing");
+        let aggregate = event_store.get_aggregate(&id).await;
         assert!(aggregate.is_none(), "Expected None for missing aggregate");
-        let events = event_store.try_get_events("missing").await;
+        let events = event_store.try_get_events(&id).await;
         assert!(
             matches!(events, Err(crate::Error::NotFound(_))),
             "Expected NotFound error"
@@ -594,16 +596,14 @@ mod tests {
             .await
             .expect("msg: Failed to create event store");
 
-        event_store.append("test2", Event::Increment(10)).await?;
-        let commit = event_store
-            .get_commit("test2")
-            .await
-            .expect("Commit not found");
+        let id = State::id("test2");
+        event_store.append(&id, Event::Increment(10)).await?;
+        let commit = event_store.get_commit(&id).await.expect("Commit not found");
         assert_eq!(commit.version, 1);
         assert_eq!(commit.inner.value, 10);
 
         // Attempting to commit with a version conflict
-        let result = event_store.commit("test2", 1, Event::Decrement(5)).await;
+        let result = event_store.commit(&id, 1, Event::Decrement(5)).await;
         assert_eq!(Err(Error::VersionConflict(1)), result);
 
         Ok(())
@@ -614,21 +614,22 @@ mod tests {
         let test_db = crate::test_helper::get_test_database().await;
         let (mut client, _connection) = init_conn(Some(&test_db.name), true).await?;
 
+        let id = State::id("test3");
         let event_store = init_event_store(&client).await.unwrap();
-        event_store.commit("test3", 1, Event::Increment(10)).await?;
+        event_store.commit(&id, 1, Event::Increment(10)).await?;
 
-        let commit = event_store.try_get_commit("test3").await?;
+        let commit = event_store.try_get_commit(&id).await?;
         assert_eq!(commit.version, 1);
         assert_eq!(commit.inner.value, 10);
 
         let db_transaction = client.transaction().await?;
         let transaction: PostgresEventStore<State, Transaction> =
             PostgresEventStore::new(&db_transaction);
-        transaction.append("test3", Event::Decrement(4)).await?;
+        transaction.append(&id, Event::Decrement(4)).await?;
         db_transaction.rollback().await?;
 
         let event_store = PostgresEventStore::new(&client);
-        let commit: Commit<State> = event_store.try_get_commit("test3").await?;
+        let commit: Commit<State> = event_store.try_get_commit(&id).await?;
         assert_eq!(commit.version, 1);
         assert_eq!(commit.inner.value, 10);
 
@@ -644,11 +645,12 @@ mod tests {
             .await
             .expect("msg: Failed to create event store");
 
+        let id = State::id("test4");
         for _ in 0..22 {
-            event_store.append("test4", Event::Increment(1)).await?;
+            event_store.append(&id, Event::Increment(1)).await?;
         }
 
-        let snapshot = event_store.load_snapshot("test4").await?;
+        let snapshot = event_store.load_snapshot(&id).await?;
         assert!(snapshot.is_some(), "Snapshot should exist");
         let snapshot = snapshot.unwrap();
         let diag = snapshot.diagnostics.unwrap();
@@ -660,7 +662,7 @@ mod tests {
         assert_eq!(snapshot.inner.value, 20, "Snapshot value should be 20");
 
         let commit = event_store
-            .get_commit("test4")
+            .get_commit(&id)
             .await
             .expect("Aggregate not found");
         let diag = commit.diagnostics.unwrap();
@@ -697,9 +699,10 @@ mod tests {
             Event::Decrement(2),
         ];
 
+        let id = State::id("test5");
         let events_to_receive = events_to_send.clone();
         for event in events_to_send {
-            event_store.append("test5", event).await?;
+            event_store.append(&id, event).await?;
         }
 
         let handle = tokio::spawn(async move {
@@ -768,9 +771,10 @@ mod tests {
             Event::Decrement(2),
         ];
 
+        let id = State::id("test5");
         let events_to_receive = events_to_send.clone();
         for event in events_to_send {
-            event_store.append("test5", event).await?;
+            event_store.append(&id, event).await?;
         }
 
         let stream = init_event_stream(Some(&test_db.name))
@@ -844,10 +848,11 @@ mod tests {
         let client = pool.get().await.expect("Failed to get client from pool");
         let event_store = init_event_store(&client).await?;
 
-        event_store.append("test6", Event::Increment(10)).await?;
-        event_store.append("test6", Event::Decrement(5)).await?;
+        let id = State::id("test6");
+        event_store.append(&id, Event::Increment(10)).await?;
+        event_store.append(&id, Event::Decrement(5)).await?;
 
-        let aggregate = event_store.get_aggregate("test6").await;
+        let aggregate = event_store.get_aggregate(&id).await;
         assert!(aggregate.is_some(), "Expected aggregate to be found");
         assert_eq!(aggregate.unwrap().value, 5);
 
@@ -862,13 +867,14 @@ mod tests {
             .await
             .expect("msg: Failed to create event store");
 
-        let result = event_store.try_get_commit("non_existent").await;
+        let id = State::id("test8");
+        let result = event_store.try_get_commit(&id).await;
         assert!(
             matches!(result, Err(Error::NotFound(_))),
             "Expected NotFound error"
         );
 
-        let result = event_store.get_commit("non_existent").await;
+        let result = event_store.get_commit(&id).await;
         assert!(result.is_none(), "Expected None for non-existent commit");
 
         Ok(())
@@ -883,17 +889,17 @@ mod tests {
             .expect("msg: Failed to create event store");
 
         let commands = Commands::new(&event_store);
-        let id = "test7";
-        event_store.commit(id, 1, Event::Increment(0)).await?;
+        let id = State::id("test7");
+        event_store.commit(&id, 1, Event::Increment(0)).await?;
         for _ in 0..10 {
-            commands.increment(id, 1).await?;
+            commands.increment(&id, 1).await?;
         }
         for _ in 0..5 {
-            commands.decrement(id, 1).await?;
+            commands.decrement(&id, 1).await?;
         }
 
         assert_eq!(
-            event_store.get_aggregate(id).await.unwrap().value,
+            event_store.get_aggregate(&id).await.unwrap().value,
             5,
             "Expected final value to be 5"
         );

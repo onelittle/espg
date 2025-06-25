@@ -7,7 +7,7 @@ pub(crate) mod sql_helpers;
 #[cfg(feature = "streaming")]
 mod streaming;
 
-use crate::Aggregate;
+use crate::{Aggregate, Id};
 #[cfg(feature = "streaming")]
 use futures::Stream;
 #[cfg(feature = "inmem")]
@@ -64,21 +64,24 @@ pub struct Commit<T> {
 
 #[allow(async_fn_in_trait)]
 pub trait EventStore<T: Aggregate + Default> {
-    async fn append(&self, id: &str, event: T::Event) -> Result<()>;
-    async fn commit(&self, id: &str, version: usize, event: T::Event) -> Result<()>;
-    async fn try_get_events_since(&self, id: &str, version: usize)
-    -> Result<Commit<Vec<T::Event>>>;
-    async fn try_get_events(&self, id: &str) -> Result<Commit<Vec<T::Event>>> {
+    async fn append(&self, id: &Id<T>, event: T::Event) -> Result<()>;
+    async fn commit(&self, id: &Id<T>, version: usize, event: T::Event) -> Result<()>;
+    async fn try_get_events_since(
+        &self,
+        id: &Id<T>,
+        version: usize,
+    ) -> Result<Commit<Vec<T::Event>>>;
+    async fn try_get_events(&self, id: &Id<T>) -> Result<Commit<Vec<T::Event>>> {
         self.try_get_events_since(id, 0).await
     }
-    async fn get_events(&self, id: &str) -> Option<Commit<Vec<T::Event>>> {
+    async fn get_events(&self, id: &Id<T>) -> Option<Commit<Vec<T::Event>>> {
         match self.try_get_events(id).await {
             Ok(events) => Some(events),
             Err(Error::NotFound(_)) => None,
             Err(_) => None,
         }
     }
-    async fn try_get_commit(&self, id: &str) -> Result<Commit<T>> {
+    async fn try_get_commit(&self, id: &Id<T>) -> Result<Commit<T>> {
         let events = self.try_get_events(id).await?;
         let id = id.to_string();
         Ok(Commit {
@@ -88,25 +91,25 @@ pub trait EventStore<T: Aggregate + Default> {
             diagnostics: None,
         })
     }
-    async fn get_commit(&self, id: &str) -> Option<Commit<T>> {
+    async fn get_commit(&self, id: &Id<T>) -> Option<Commit<T>> {
         match self.try_get_commit(id).await {
             Ok(commit) => Some(commit),
             Err(Error::NotFound(_)) => None,
             Err(_) => None,
         }
     }
-    async fn try_get_aggregate(&self, id: &str) -> Result<T> {
+    async fn try_get_aggregate(&self, id: &Id<T>) -> Result<T> {
         self.try_get_commit(id).await.map(|r| r.inner)
     }
-    async fn get_aggregate(&self, id: &str) -> Option<T> {
+    async fn get_aggregate(&self, id: &Id<T>) -> Option<T> {
         self.get_commit(id).await.map(|r| r.inner)
     }
     #[allow(unused_variables)]
-    async fn store_snapshot(&self, id: &str) -> Result<()> {
+    async fn store_snapshot(&self, id: &Id<T>) -> Result<()> {
         Ok(())
     }
     #[allow(unused_variables)]
-    async fn load_snapshot(&self, id: &str) -> Result<Option<Commit<T>>> {
+    async fn load_snapshot(&self, id: &Id<T>) -> Result<Option<Commit<T>>> {
         Ok(None)
     }
 

@@ -1,5 +1,5 @@
 use espg::{
-    Aggregate, Commands as _, Commit, EventStore, EventStream, PostgresEventStore,
+    Aggregate, Commands as _, Commit, EventStore, EventStream, Id, PostgresEventStore,
     PostgresEventStream, StreamingEventStore,
 };
 use serde::{Deserialize, Serialize};
@@ -69,17 +69,25 @@ impl<'a, E: EventStore<AccountState>> espg::Commands<'a, E, AccountState> for Co
 }
 
 impl<'a, E: EventStore<AccountState>> Commands<'a, E> {
-    async fn open_account(&'a self) -> Result<String, espg::Error> {
-        let id = uuid::Uuid::new_v4().to_string();
+    async fn open_account(&'a self) -> Result<Id<AccountState>, espg::Error> {
+        let id = AccountState::id(uuid::Uuid::new_v4().to_string());
         self.commit(&id, 1, Event::AccountOpened).await?;
         Ok(id)
     }
 
-    async fn deposit_money(&'a self, id: &str, amount: i64) -> Result<(), espg::Error> {
+    async fn deposit_money(
+        &'a self,
+        id: &Id<AccountState>,
+        amount: i64,
+    ) -> Result<(), espg::Error> {
         self.append(id, Event::MoneyDeposited(amount)).await
     }
 
-    async fn withdraw_money(&'a self, id: &str, amount: i64) -> Result<(), espg::Error> {
+    async fn withdraw_money(
+        &'a self,
+        id: &Id<AccountState>,
+        amount: i64,
+    ) -> Result<(), espg::Error> {
         self.retry_on_version_conflict(|| async {
             #[allow(clippy::unwrap_used)]
             let commit = self.event_store.get_commit(id).await.unwrap();
@@ -90,7 +98,7 @@ impl<'a, E: EventStore<AccountState>> Commands<'a, E> {
         .await
     }
 
-    async fn close_account(&'a self, id: &str) -> Result<(), espg::Error> {
+    async fn close_account(&'a self, id: &Id<AccountState>) -> Result<(), espg::Error> {
         self.append(id, Event::AccountClosed).await
     }
 }
