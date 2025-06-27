@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+#[cfg(feature = "rocket")]
+use rocket::request::FromParam;
 use serde::{Serialize, de::DeserializeOwned};
 
 pub struct Id<T: Aggregate>(pub String, PhantomData<T>);
@@ -43,5 +45,14 @@ where
         Self: Sized,
     {
         Id(id.into(), PhantomData)
+    }
+}
+
+#[cfg(feature = "rocket")]
+impl<T: Aggregate> FromParam<'_> for Id<T> {
+    type Error = String;
+
+    fn from_param(param: &str) -> Result<Self, Self::Error> {
+        Ok(Id(param.to_string(), PhantomData))
     }
 }

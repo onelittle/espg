@@ -2,14 +2,12 @@
 use std::sync::atomic::AtomicUsize;
 use std::{any::Any, sync::Arc};
 
-use dyn_clone::DynClone;
+use async_trait::async_trait;
 #[cfg(feature = "streaming")]
 use futures::Stream;
 use indexmap::IndexMap;
 #[cfg(feature = "streaming")]
-use tokio::sync::broadcast::error::SendError;
-#[cfg(feature = "streaming")]
-use tokio_stream::wrappers::{UnboundedReceiverStream, errors::BroadcastStreamRecvError};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::{Commit, Error, EventStore, Result};
 #[cfg(feature = "streaming")]
@@ -22,19 +20,35 @@ type RwLock<T> = tokio::sync::RwLock<T>;
 
 pub struct InMemoryEventStore {
     pub(crate) store: Arc<RwLock<IndexMap<String, CommitTuple>>>,
-    broadcast: tokio::sync::broadcast::Sender<Box<dyn Any + DynClone + Send + Sync>>,
-    _rx: Option<tokio::sync::broadcast::Receiver<Box<dyn Any + DynClone + Send + Sync>>>,
+    broadcast: tokio::sync::broadcast::Sender<Commit<String>>,
+    _rx: Option<tokio::sync::broadcast::Receiver<Commit<String>>>,
     #[cfg(test)]
     pub(crate) version_conflicts: AtomicUsize,
 }
 
+impl InMemoryEventStore {
+    pub async fn len(&self) -> usize {
+        let store = self.store.read().await;
+        let mut events = 0;
+        for (_, (_, event_list)) in store.iter() {
+            events += event_list.len();
+        }
+        events
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        let store = self.store.read().await;
+        store.is_empty()
+    }
+}
+
 impl Clone for InMemoryEventStore {
     fn clone(&self) -> Self {
-        // let tx = self.broadcast.clone();
+        let tx = self.broadcast.clone();
         InMemoryEventStore {
             store: self.store.clone(),
-            // broadcast: tx,
-            // _rx: None,
+            broadcast: tx,
+            _rx: None,
             #[cfg(test)]
             version_conflicts: AtomicUsize::new(0),
         }
@@ -43,17 +57,40 @@ impl Clone for InMemoryEventStore {
 
 impl Default for InMemoryEventStore {
     fn default() -> Self {
-        // let (tx, _rx) = tokio::sync::broadcast::channel::<Box<dyn Any + Send + Sync>>(100);
+        let (tx, _rx) = tokio::sync::broadcast::channel::<Commit<String>>(100);
         InMemoryEventStore {
             store: Arc::new(RwLock::new(IndexMap::new())),
-            // broadcast: tx,
-            // _rx: Some(_rx),
+            broadcast: tx,
+            _rx: Some(_rx),
             #[cfg(test)]
             version_conflicts: AtomicUsize::new(0),
         }
     }
 }
 
+impl InMemoryEventStore {
+    #[cfg(feature = "streaming")]
+    async fn transmit<X: Aggregate>(&self, commit: Commit<X::Event>) -> Result<()> {
+        use tokio::sync::broadcast::error::SendError;
+
+        #[allow(clippy::expect_used)]
+        let commit = Commit {
+            id: commit.id,
+            version: commit.version,
+            inner: serde_json::to_string(&commit.inner).expect("Failed to serialize event to JSON"),
+            diagnostics: commit.diagnostics,
+        };
+        match &self.broadcast.send(commit) {
+            Ok(_) => {}
+            Err(SendError(_event)) => {
+                eprintln!("Stream closed, cannot send event");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
 impl EventStore for InMemoryEventStore {
     async fn append<X: Aggregate>(&self, id: &Id<X>, action: X::Event) -> Result<()> {
         let version = {
@@ -111,7 +148,7 @@ impl EventStore for InMemoryEventStore {
     ) -> Result<Commit<Vec<X::Event>>> {
         let store = self.store.read().await;
         let stored_commit = store
-            .get(&id.0)
+            .get(&id.0.to_string())
             .ok_or(Error::NotFound("Aggregate not found".to_string()))?;
 
         let inner: Vec<X::Event> = stored_commit
@@ -120,6 +157,7 @@ impl EventStore for InMemoryEventStore {
             .enumerate()
             .skip_while(|(v, _)| *v < version)
             .map(|(_, event)| {
+                #[allow(clippy::expect_used)]
                 event
                     .downcast_ref::<X::Event>()
                     .expect("Event should be of type T::Event")
@@ -133,19 +171,6 @@ impl EventStore for InMemoryEventStore {
             inner,
         })
     }
-    #[cfg(feature = "streaming")]
-    async fn transmit<X: Aggregate>(&self, _commit: Commit<X::Event>) -> Result<()> {
-        panic!("Streaming is not enabled for InMemoryEventStore.");
-        // match &self.broadcast.send(Box::new(commit)) {
-        //     Ok(_) => {
-        //         eprintln!("Transmitted event successfully");
-        //     }
-        //     Err(SendError(_event)) => {
-        //         eprintln!("Stream closed, cannot send event");
-        //     }
-        // }
-        // Ok(())
-    }
 }
 
 #[cfg(feature = "streaming")]
@@ -153,52 +178,81 @@ impl StreamingEventStore for InMemoryEventStore {
     #[cfg(feature = "streaming")]
     async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = Commit<X::Event>>> {
         use tokio_stream::wrappers::{BroadcastStream, UnboundedReceiverStream};
-        todo!("Streaming is not enabled for InMemoryEventStore.")
-        // let rx = self.broadcast.subscribe();
-        // let mut stream = BroadcastStream::new(rx);
-        // let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel::<Commit<X::Event>>();
-        // let store = self.store.read().await;
-        // let stream2 = UnboundedReceiverStream::new(rx1);
+        let rx = self.broadcast.subscribe();
+        let mut stream = BroadcastStream::new(rx);
+        let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel::<Commit<X::Event>>();
+        let store = self.store.read().await;
+        let stream2 = UnboundedReceiverStream::new(rx1);
 
-        // for (id, (_, events)) in store.iter() {
-        //     for (version_index, event) in events.iter().enumerate() {
-        //         let event = event
-        //             .downcast_ref::<T::Event>()
-        //             .expect("Event should be of type T::Event")
-        //             .clone();
-        //         let version = version_index + 1; // Versioning starts from 1
-        //         let commit = Commit {
-        //             id: id.clone(),
-        //             version,
-        //             inner: event,
-        //             diagnostics: None,
-        //         };
-        //         if tx1.send(commit).is_err() {
-        //             eprintln!("Stream closed, cannot send initial event");
-        //         }
-        //     }
-        // }
+        for (id, (_, events)) in store.iter() {
+            for (version_index, event) in events.iter().enumerate() {
+                #[allow(clippy::expect_used)]
+                let event = event
+                    .downcast_ref::<X::Event>()
+                    .expect("Event should be of type T::Event")
+                    .clone();
+                let version = version_index + 1; // Versioning starts from 1
+                let commit = Commit {
+                    id: id.clone(),
+                    version,
+                    inner: event,
+                    diagnostics: None,
+                };
+                if tx1.send(commit).is_err() {
+                    eprintln!("Stream closed, cannot send initial event");
+                }
+            }
+        }
 
-        // tokio::spawn(async move {
-        //     use tokio_stream::StreamExt;
+        tokio::spawn(async move {
+            use tokio_stream::StreamExt;
 
-        //     while let Some(result) = stream.next().await {
-        //         eprintln!("Processing event from stream");
-        //         match result {
-        //             Ok(commit) => {
-        //                 if tx1.send(commit).is_err() {
-        //                     eprintln!("Stream closed, cannot send event");
-        //                 }
-        //             }
-        //             Err(BroadcastStreamRecvError::Lagged(_)) => {
-        //                 eprintln!("Stream lagged, skipping events");
-        //             }
-        //         }
-        //     }
-        //     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        //     eprintln!("Stream processing ended...");
-        // });
-        // Ok(stream2)
+            while let Some(result) = stream.next().await {
+                eprintln!("Processing event from stream");
+                match result {
+                    Ok(commit) => {
+                        let result = serde_json::from_str::<X::Event>(&commit.inner);
+                        match result {
+                            Ok(event) => {
+                                let commit = Commit {
+                                    id: commit.id,
+                                    version: commit.version,
+                                    inner: event,
+                                    diagnostics: commit.diagnostics,
+                                };
+                                if tx1.send(commit).is_err() {
+                                    eprintln!("Stream closed, cannot send event");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to deserialize event: {}", e);
+                                match e.classify() {
+                                    serde_json::error::Category::Syntax => {
+                                        eprintln!("Syntax error in event JSON: {}", e);
+                                    }
+                                    serde_json::error::Category::Data => {
+                                        eprintln!("Data error in event JSON: {}", e);
+                                    }
+                                    serde_json::error::Category::Eof => {
+                                        eprintln!("Unexpected end of file in event JSON: {}", e);
+                                    }
+                                    serde_json::error::Category::Io => {
+                                        eprintln!("I/O error while reading event JSON: {}", e);
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    Err(BroadcastStreamRecvError::Lagged(_)) => {
+                        eprintln!("Stream lagged, skipping events");
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            eprintln!("Stream processing ended...");
+        });
+        Ok(stream2)
     }
 }
 
@@ -272,7 +326,7 @@ mod tests {
         let event_store: InMemoryEventStore = Default::default();
         let stream = event_store
             .clone()
-            .stream()
+            .stream::<State>()
             .await
             .expect("msg: Failed to create event stream");
 
@@ -362,7 +416,7 @@ mod tests {
 
         let stream = event_store
             .clone()
-            .stream()
+            .stream::<State>()
             .await
             .expect("msg: Failed to create event stream");
 

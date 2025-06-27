@@ -64,7 +64,7 @@ pub struct Commit<T> {
 }
 
 #[async_trait]
-pub trait EventStore {
+pub trait EventStore: Sync {
     async fn append<X: Aggregate>(&self, id: &Id<X>, event: X::Event) -> Result<()>;
     async fn commit<X: Aggregate + Serialize>(
         &self,
@@ -122,8 +122,22 @@ pub trait EventStore {
         Ok(None)
     }
 
-    #[cfg(feature = "streaming")]
-    async fn transmit<X: Aggregate>(&self, event: Commit<X::Event>) -> Result<()>;
+    async fn retry_on_version_conflict<'a, 'b, F, Fut, R>(&'a self, mut f: F) -> Result<()>
+    where
+        F: FnMut() -> Fut + Send + 'b,
+        Fut: std::future::Future<Output = Result<R>> + Send + 'b,
+        'a: 'b,
+    {
+        loop {
+            match f().await {
+                Ok(_) => return Ok(()),
+                Err(Error::VersionConflict(_)) => {
+                    eprintln!("Version conflict occurred, retrying...");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
 
 #[cfg(feature = "streaming")]

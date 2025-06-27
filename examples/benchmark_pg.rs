@@ -1,5 +1,6 @@
-use espg::{Aggregate, EventStore, Id, InMemoryEventStore};
+use espg::{Aggregate, EventStore, Id, PostgresEventStore};
 use serde::{Deserialize, Serialize};
+use tokio_postgres::NoTls;
 
 #[derive(Default, Serialize, Deserialize)]
 struct AccountState {
@@ -43,11 +44,11 @@ impl Aggregate for AccountState {
 }
 
 struct Commands<'a> {
-    event_store: &'a mut InMemoryEventStore,
+    event_store: &'a mut PostgresEventStore<'a, tokio_postgres::Client>,
 }
 
 impl<'a> Commands<'a> {
-    fn new(event_store: &'a mut InMemoryEventStore) -> Self {
+    fn new(event_store: &'a mut PostgresEventStore<'a, tokio_postgres::Client>) -> Self {
         Commands { event_store }
     }
 
@@ -83,18 +84,41 @@ impl<'a> Commands<'a> {
 #[tokio::main]
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::expect_used)]
-async fn main() {
+async fn main() -> espg::Result<()> {
     let instant = std::time::Instant::now();
+    let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
+    let (client, connection) = tokio_postgres::connect(&connection_string, NoTls).await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {}", e);
+        }
+    });
+
+    espg::event_stores::postgres::initialize(&client).await?;
+    espg::event_stores::postgres::clear(&client).await?;
 
     println!("Starting benchmark...");
-    // Initialize the in-memory event store
-    let event_store = espg::InMemoryEventStore::default();
+    // Initialize the event store
+    let event_store = espg::PostgresEventStore::new(&client);
 
     // Spawn 8 threads and perform 100000 operations in each
     let mut handles = vec![];
     for i in 0..8 {
-        let mut event_store_clone = event_store.clone();
         let handle = tokio::spawn(async move {
+            let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
+            let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
+                .await
+                .unwrap();
+
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Connection error: {}", e);
+                }
+            });
+
+            let mut event_store_clone = PostgresEventStore::new(&client);
+
             let mut commands = Commands::new(&mut event_store_clone);
             let account_id = AccountState::id(format!("account{}", i + 100_000));
             commands.open_account(&account_id).await.unwrap();
@@ -121,8 +145,19 @@ async fn main() {
 
     let mut handles = vec![];
     for i in 0..8 {
-        let event_store_clone = event_store.clone();
         let handle = tokio::spawn(async move {
+            let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
+            let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
+                .await
+                .unwrap();
+
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Connection error: {}", e);
+                }
+            });
+
+            let event_store_clone = PostgresEventStore::new(&client);
             let id = AccountState::id(format!("account{}", i + 100_000));
             let state = event_store_clone
                 .get_commit(&id)
@@ -146,4 +181,6 @@ async fn main() {
         "Read benchmark completed in {}ms",
         instant.elapsed().as_millis()
     );
+
+    Ok(())
 }

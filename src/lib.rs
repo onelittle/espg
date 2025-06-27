@@ -1,9 +1,7 @@
 mod aggregate;
-mod commands;
 pub mod event_stores;
 
 pub use aggregate::{Aggregate, Id};
-pub use commands::Commands;
 #[cfg(feature = "inmem")]
 pub use event_stores::InMemoryEventStore;
 #[cfg(feature = "postgres")]
@@ -20,8 +18,6 @@ pub use event_stores::postgres::PostgresEventStream;
 #[cfg(test)]
 mod tests {
     use serde::{Deserialize, Serialize};
-
-    use crate::{Commands as _, EventStore, aggregate::Id};
 
     use super::Aggregate;
 
@@ -52,41 +48,38 @@ mod tests {
         }
     }
 
-    pub struct Commands<'a, E: super::EventStore> {
-        event_store: &'a E,
-    }
+    pub mod commands {
+        use super::{Event, State};
+        use crate::{EventStore, Id, Result};
 
-    impl<'a, E: super::EventStore> Commands<'a, E> {
-        pub fn new(event_store: &'a E) -> Self {
-            Self { event_store }
-        }
-    }
-
-    impl<'a, E: super::EventStore> super::Commands<'a> for Commands<'a, E> {
-        fn event_store(&'a self) -> &'a impl EventStore {
-            self.event_store
-        }
-    }
-
-    impl<E: super::EventStore + Sync> Commands<'_, E> {
-        pub async fn increment(&self, id: &Id<State>, amount: i32) -> super::Result<()> {
-            self.retry_on_version_conflict(|| async {
-                let aggregate = self.event_store.try_get_commit(id).await?;
-                let event = Event::Increment(amount);
-                self.commit(id, aggregate.version + 1, event).await?;
-                Ok(())
-            })
-            .await
+        pub async fn increment(
+            event_store: &impl EventStore,
+            id: &Id<State>,
+            amount: i32,
+        ) -> Result<()> {
+            event_store
+                .retry_on_version_conflict(|| async {
+                    let aggregate = event_store.try_get_commit(id).await?;
+                    let event = Event::Increment(amount);
+                    event_store.commit(id, aggregate.version + 1, event).await?;
+                    Ok(())
+                })
+                .await
         }
 
-        pub async fn decrement(&self, id: &Id<State>, amount: i32) -> super::Result<()> {
-            self.retry_on_version_conflict(|| async {
-                let aggregate = self.event_store.try_get_commit(id).await?;
-                let event = Event::Decrement(amount);
-                self.commit(id, aggregate.version + 1, event).await?;
-                Ok(())
-            })
-            .await
+        pub async fn decrement(
+            event_store: &impl EventStore,
+            id: &Id<State>,
+            amount: i32,
+        ) -> Result<()> {
+            event_store
+                .retry_on_version_conflict(|| async {
+                    let aggregate = event_store.try_get_commit(id).await?;
+                    let event = Event::Decrement(amount);
+                    event_store.commit(id, aggregate.version + 1, event).await?;
+                    Ok(())
+                })
+                .await
         }
     }
 
@@ -123,6 +116,7 @@ mod tests {
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
+#[allow(clippy::unwrap_used)]
 mod test_helper {
     use tokio::io::AsyncReadExt;
 

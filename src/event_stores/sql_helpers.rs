@@ -18,3 +18,20 @@ pub const CREATE_SNAPSHOTS: &str = r#"
         PRIMARY KEY (aggregate_id, aggregate_type, key)
     )
 "#;
+
+pub const CREATE_TRIGGER: &str = r#"
+    CREATE OR REPLACE FUNCTION events_notification() RETURNS TRIGGER AS $$
+        BEGIN
+        PERFORM pg_notify(MD5('events'), '-');
+        PERFORM pg_notify(MD5('events:' || NEW.aggregate_type), '' || NEW.aggregate_id);
+        PERFORM pg_notify(MD5('events:' || NEW.aggregate_type || ':' || NEW.aggregate_id), '' || NEW.version);
+        RETURN NULL;
+        END;
+    $$ LANGUAGE plpgsql;
+
+    CREATE OR REPLACE TRIGGER events_notification_trigger
+    AFTER INSERT
+    ON events
+    FOR EACH ROW
+    EXECUTE PROCEDURE events_notification();
+"#;

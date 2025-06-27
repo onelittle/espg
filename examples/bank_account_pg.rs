@@ -1,7 +1,5 @@
-use async_trait::async_trait;
 use espg::{
-    Aggregate, Commands as _, Commit, EventStore, Id, PostgresEventStore, PostgresEventStream,
-    StreamingEventStore,
+    Aggregate, Commit, EventStore, Id, PostgresEventStore, PostgresEventStream, StreamingEventStore,
 };
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -56,54 +54,42 @@ fn update_stats_display(active_accounts: usize, total_balance: i64) {
     );
 }
 
-struct Commands<'a, E: EventStore> {
-    event_store: &'a E,
+async fn open_account(event_store: &impl EventStore) -> Result<Id<AccountState>, espg::Error> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let id = AccountState::id(&id);
+    event_store.commit(&id, 1, Event::AccountOpened).await?;
+    Ok(id)
 }
 
-#[async_trait]
-impl<'a, E: EventStore> espg::Commands<'a> for Commands<'a, E> {
-    fn event_store(&'a self) -> &'a impl EventStore {
-        self.event_store
-    }
+async fn deposit_money(
+    event_store: &impl EventStore,
+    id: &Id<AccountState>,
+    amount: i64,
+) -> Result<(), espg::Error> {
+    event_store.append(id, Event::MoneyDeposited(amount)).await
 }
 
-impl<'a, E: EventStore + Sync> Commands<'a, E> {
-    fn new(event_store: &'a E) -> Self {
-        Self { event_store }
-    }
-
-    async fn open_account(&'a self) -> Result<Id<AccountState>, espg::Error> {
-        let id = AccountState::id(uuid::Uuid::new_v4().to_string());
-        self.commit(&id, 1, Event::AccountOpened).await?;
-        Ok(id)
-    }
-
-    async fn deposit_money(
-        &'a self,
-        id: &Id<AccountState>,
-        amount: i64,
-    ) -> Result<(), espg::Error> {
-        self.append(id, Event::MoneyDeposited(amount)).await
-    }
-
-    async fn withdraw_money(
-        &'a self,
-        id: &Id<AccountState>,
-        amount: i64,
-    ) -> Result<(), espg::Error> {
-        self.retry_on_version_conflict(|| async {
+async fn withdraw_money(
+    event_store: &impl EventStore,
+    id: &Id<AccountState>,
+    amount: i64,
+) -> Result<(), espg::Error> {
+    event_store
+        .retry_on_version_conflict(|| async {
             #[allow(clippy::unwrap_used)]
-            let commit = self.event_store.get_commit(id).await.unwrap();
-            self.event_store
+            let commit = event_store.get_commit(id).await.unwrap();
+            event_store
                 .commit(id, commit.version + 1, Event::MoneyWithdrawn(amount))
                 .await
         })
         .await
-    }
+}
 
-    async fn close_account(&'a self, id: &Id<AccountState>) -> Result<(), espg::Error> {
-        self.append(id, Event::AccountClosed).await
-    }
+async fn close_account(
+    event_store: &impl EventStore,
+    id: &Id<AccountState>,
+) -> Result<(), espg::Error> {
+    event_store.append(id, Event::AccountClosed).await
 }
 
 #[allow(clippy::expect_used)]
@@ -138,21 +124,19 @@ async fn main() -> espg::Result<()> {
     let stream = init_event_stream().await;
 
     let event_store = PostgresEventStore::new(&client);
-    let commands = Commands::new(&event_store);
-    let id = commands.open_account().await?;
-    commands.deposit_money(&id, 100).await?;
-    commands.withdraw_money(&id, 50).await?;
-    let id2 = commands.open_account().await?;
-    commands.deposit_money(&id2, 200).await?;
-    commands.close_account(&id2).await?;
+    let id = open_account(&event_store).await?;
+    deposit_money(&event_store, &id, 100).await?;
+    withdraw_money(&event_store, &id, 50).await?;
+    let id2 = open_account(&event_store).await?;
+    deposit_money(&event_store, &id2, 200).await?;
+    close_account(&event_store, &id2).await?;
 
     let thread_b = {
         let id = id.clone();
         tokio::spawn(async move {
             let event_store = PostgresEventStore::new(&client);
-            let commands = Commands::new(&event_store);
-            commands.deposit_money(&id, 100).await?;
-            commands.withdraw_money(&id, 50).await?;
+            deposit_money(&event_store, &id, 100).await?;
+            withdraw_money(&event_store, &id, 50).await?;
 
             espg::Result::Ok(())
         })

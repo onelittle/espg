@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use futures::Stream;
 #[cfg(feature = "streaming")]
 use futures_channel::mpsc;
+#[cfg(feature = "streaming")]
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_postgres::{GenericClient, types::Json};
@@ -29,17 +30,25 @@ where
             snapshot_interval: 10,
         }
     }
-}
 
-#[cfg(feature = "deadpool")]
-impl<'a, 'b> From<&'a deadpool_postgres::ClientWrapper>
-    for PostgresEventStore<'b, tokio_postgres::Client>
-where
-    'a: 'b,
-{
-    fn from(client: &'a deadpool_postgres::ClientWrapper) -> Self {
-        let client = &**client;
-        PostgresEventStore::new(client)
+    #[allow(clippy::expect_used)]
+    pub async fn len(&self) -> usize {
+        let row = self
+            .client
+            .query_one("SELECT COUNT(*) FROM events", &[])
+            .await
+            .expect("Failed to count events");
+        row.get::<_, i64>(0) as usize
+    }
+
+    #[allow(clippy::expect_used)]
+    pub async fn is_empty(&self) -> bool {
+        let row = self
+            .client
+            .query_one("SELECT * FROM events LIMIT 1", &[])
+            .await
+            .expect("Failed to count events");
+        row.is_empty()
     }
 }
 
@@ -54,6 +63,10 @@ pub async fn initialize(
 
     client
         .batch_execute(super::sql_helpers::CREATE_SNAPSHOTS)
+        .await?;
+
+    client
+        .batch_execute(super::sql_helpers::CREATE_TRIGGER)
         .await?;
 
     Ok(())
@@ -168,45 +181,38 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
             self.store_snapshot::<X>(id).await?;
         }
 
-        #[cfg(feature = "streaming")]
-        self.transmit::<X>(Commit {
-            id: id.to_string(),
-            version,
-            diagnostics: None,
-            inner: action,
-        })
-        .await?;
-        eprintln!("Committed event for {}: version {}", id.0, version);
-
         Ok(())
     }
 
     async fn store_snapshot<X: Aggregate>(&self, id: &Id<X>) -> Result<()> {
-        if let Some(key) = X::snapshot_key() {
-            let Commit {
-                id: _,
-                version,
-                diagnostics: _,
-                inner,
-            } = self.try_get_commit(id).await?;
-            let snapshot: Value = serde_json::to_value(inner)?;
-            self.client
-                .execute(
-                    r#"
-                    INSERT INTO snapshots (aggregate_id, aggregate_type, key, version, snapshot)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (aggregate_id, aggregate_type, key) DO UPDATE SET version = EXCLUDED.version, snapshot = EXCLUDED.snapshot
-            "#,
-                    &[&id.0, &X::name(), &key, &(version as i32), &snapshot],
-                )
-                .await?;
-        }
+        let Some(key) = X::snapshot_key() else {
+            return Ok(());
+        };
+        let Commit {
+            id: _,
+            version,
+            diagnostics: _,
+            inner,
+        } = self.try_get_commit(id).await?;
+        let snapshot: Value = serde_json::to_value(inner)?;
+        self.client
+            .execute(
+                r#"
+                INSERT INTO snapshots (aggregate_id, aggregate_type, key, version, snapshot)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (aggregate_id, aggregate_type, key) DO UPDATE SET version = EXCLUDED.version, snapshot = EXCLUDED.snapshot
+        "#,
+                &[&id.0, &X::name(), &key, &(version as i32), &snapshot],
+            )
+            .await?;
         Ok(())
     }
 
     async fn load_snapshot<X: Aggregate>(&self, id: &Id<X>) -> Result<Option<Commit<X>>> {
-        if let Some(key) = X::snapshot_key() {
-            let row = self
+        let Some(key) = X::snapshot_key() else {
+            return Ok(None);
+        };
+        let row = self
                 .client
                 .query_opt(
                     "SELECT version, snapshot FROM snapshots WHERE aggregate_id = $1 AND aggregate_type = $2 AND key = $3",
@@ -214,22 +220,19 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
                 )
                 .await?;
 
-            if let Some(row) = row {
-                let version = row.get::<'_, _, i32>(0) as usize;
-                let snapshot_col: Json<X> = row.get(1);
-                let inner = snapshot_col.0;
-                return Ok(Some(Commit {
-                    id: id.to_string(),
-                    version,
-                    diagnostics: Some(Diagnostics {
-                        loaded_events: 0,
-                        snapshotted: true,
-                    }),
-                    inner,
-                }));
-            }
-        }
-        Ok(None)
+        let Some(row) = row else { return Ok(None) };
+        let version = row.get::<'_, _, i32>(0) as usize;
+        let snapshot_col: Json<X> = row.get(1);
+        let inner = snapshot_col.0;
+        Ok(Some(Commit {
+            id: id.to_string(),
+            version,
+            diagnostics: Some(Diagnostics {
+                loaded_events: 0,
+                snapshotted: true,
+            }),
+            inner,
+        }))
     }
 
     async fn append<X: Aggregate>(&self, id: &Id<X>, action: X::Event) -> Result<()> {
@@ -259,21 +262,6 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
                 return Err(Error::VersionConflict(version));
             }
         }
-    }
-
-    #[cfg(feature = "streaming")]
-    async fn transmit<X: Aggregate>(&self, commit: Commit<X::Event>) -> Result<()> {
-        // Execute listen/notify
-        self.client
-            .execute(
-                r#"
-             SELECT pg_notify('event_notifications', $1)
-             "#,
-                &[&serde_json::to_string(&commit)?],
-            )
-            .await?;
-
-        Ok(())
     }
 }
 
@@ -306,15 +294,19 @@ where
 
     #[mutants::skip]
     async fn listen(
-        client: &tokio_postgres::Client,
+        client: tokio_postgres::Client,
         mut connection: tokio_postgres::Connection<
             tokio_postgres::Socket,
             tokio_postgres::tls::NoTlsStream,
         >,
     ) -> tokio::sync::mpsc::UnboundedReceiver<Commit<T::Event>> {
+        use std::collections::HashMap;
+
         use futures::FutureExt;
         use futures::StreamExt;
         use futures::TryStreamExt;
+        use md5::Digest;
+        use md5::Md5;
 
         let (tx, mut rx) = mpsc::unbounded();
         let stream = futures::stream::poll_fn(move |cx| connection.poll_message(cx))
@@ -324,13 +316,13 @@ where
         tokio::spawn(connection);
 
         let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel::<Commit<T::Event>>();
-        let mut max_version_seen = None;
+        let mut max_versions_seen: HashMap<String, i32> = Default::default();
         {
             let tx2 = tx2.clone();
             #[allow(clippy::expect_used)]
             let rows = client
             .query(
-                r#"SELECT aggregate_id, "version", action FROM events WHERE aggregate_type = $1 ORDER BY version"#,
+                r#"SELECT aggregate_id, "version", action FROM events WHERE aggregate_type = $1"#,
                 &[&T::name()],
             )
             .await.expect("Failed to query events");
@@ -349,11 +341,10 @@ where
                 };
 
                 // Update max_version_seen if this commit's version is greater
-                match (version, max_version_seen) {
-                    (v, Some(max)) if v as usize > max => max_version_seen = Some(v as usize),
-                    (v, None) => max_version_seen = Some(v as usize),
-                    _ => {}
-                };
+                max_versions_seen
+                    .entry(commit.id.clone())
+                    .and_modify(|v| *v = (*v).max(version))
+                    .or_insert(version);
 
                 // Send the commit to the channel
                 if tx2.send(commit).is_err() {
@@ -362,26 +353,58 @@ where
                 }
             }
         }
+        let mut hasher = Md5::new();
+        hasher.update(format!("events:{}", T::name()).as_bytes());
+        let result = hasher.finalize();
+        let result = format!("{:x}", result);
+        #[allow(clippy::expect_used)]
+        client
+            .batch_execute(&format!("LISTEN {};", result))
+            .await
+            .expect("Failed to listen for notifications");
+
         tokio::task::spawn(async move {
             use futures::stream::StreamExt;
             loop {
                 match rx.next().await {
                     Some(tokio_postgres::AsyncMessage::Notification(notification)) => {
-                        eprintln!("Received notification: {}", notification.payload());
+                        let aggregate_id = T::id(notification.payload());
+
+                        let max_version =
+                            max_versions_seen.get(&aggregate_id.0).cloned().unwrap_or(0);
+
                         #[allow(clippy::expect_used)]
-                        let commit: Commit<T::Event> = serde_json::from_str(notification.payload())
-                            .expect("Failed to parse notification payload");
-                        if Some(commit.version) <= max_version_seen {
-                            eprintln!(
-                                "Ignoring commit with version {} as it is not newer than max seen {}",
-                                commit.version,
-                                max_version_seen.unwrap_or(0)
-                            );
-                            continue;
-                        }
-                        if tx2.send(commit).is_err() {
-                            eprintln!("Stream closed, cannot send event");
-                            break;
+                        let rows = client
+                        .query(
+                            r#"SELECT aggregate_id, "version", action FROM events WHERE aggregate_type = $1 AND version > $2 AND aggregate_id = $3 ORDER BY version"#,
+                            &[&T::name(), &max_version, &aggregate_id.0],
+                        )
+                        .await.expect("Failed to query events");
+
+                        for row in rows {
+                            let aggregate_id: String = row.get(0);
+                            let version: i32 = row.get(1);
+                            let action: Json<T::Event> = row.get(2);
+
+                            // Create a Commit from the row data
+                            let commit = Commit {
+                                id: aggregate_id,
+                                version: version as usize,
+                                diagnostics: None,
+                                inner: action.0,
+                            };
+
+                            // Update max_version_seen if this commit's version is greater
+                            max_versions_seen
+                                .entry(commit.id.clone())
+                                .and_modify(|v| *v = (*v).max(version))
+                                .or_insert(version);
+
+                            // Send the commit to the channel
+                            if tx2.send(commit).is_err() {
+                                eprintln!("Stream closed, cannot send event");
+                                break;
+                            }
                         }
                     }
                     Some(_) => {
@@ -403,11 +426,9 @@ where
 impl<T: Aggregate> StreamingEventStore for PostgresEventStream<T> {
     async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = Commit<X::Event>>> {
         let client = self.client;
-        let rx2 = PostgresEventStream::<X>::listen(&client, self.connection).await;
+        let rx2 = PostgresEventStream::<X>::listen(client, self.connection).await;
         #[allow(clippy::expect_used)]
-        client.batch_execute("LISTEN event_notifications;").await?;
-
-        Ok(EventStream::new(rx2, client))
+        Ok(EventStream::new(rx2, ()))
     }
 }
 
@@ -420,7 +441,7 @@ mod tests {
     use tokio_stream::StreamExt;
 
     use super::*;
-    use crate::tests::{Commands, Event, State};
+    use crate::tests::{Event, State};
 
     async fn get_connection_string(
         db_name: Option<&str>,
@@ -517,15 +538,14 @@ mod tests {
     async fn init_event_stream(
         db_name: Option<&str>,
     ) -> std::result::Result<impl Stream<Item = Commit<Event>> + use<>, tokio_postgres::Error> {
-        if let (client, Some(connection)) = init_conn(db_name, false).await? {
-            let es = PostgresEventStream::<State>::new(client, connection).await;
-            Ok(es
-                .stream::<State>()
-                .await
-                .expect("Failed to create event stream"))
-        } else {
+        let (client, Some(connection)) = init_conn(db_name, false).await? else {
             panic!("Failed to initialize Postgres connection");
-        }
+        };
+        let es = PostgresEventStream::<State>::new(client, connection).await;
+        Ok(es
+            .stream::<State>()
+            .await
+            .expect("Failed to create event stream"))
     }
 
     #[tokio::test]
@@ -875,14 +895,13 @@ mod tests {
             .await
             .expect("msg: Failed to create event store");
 
-        let commands = Commands::new(&event_store);
         let id = State::id("test7");
         event_store.commit(&id, 1, Event::Increment(0)).await?;
         for _ in 0..10 {
-            commands.increment(&id, 1).await?;
+            crate::tests::commands::increment(&event_store, &id, 1).await?;
         }
         for _ in 0..5 {
-            commands.decrement(&id, 1).await?;
+            crate::tests::commands::decrement(&event_store, &id, 1).await?;
         }
 
         assert_eq!(

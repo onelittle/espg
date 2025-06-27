@@ -1,4 +1,4 @@
-use espg::{Aggregate, Commands as _, EventStore, Id, InMemoryEventStore, StreamingEventStore};
+use espg::{Aggregate, EventStore, Id, InMemoryEventStore, StreamingEventStore};
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
@@ -50,54 +50,41 @@ fn update_stats_display(active_accounts: usize, total_balance: i64) {
     );
 }
 
-#[derive(Clone)]
-struct Commands<'a> {
-    event_store: &'a InMemoryEventStore<AccountState>,
+async fn open_account(event_store: &impl EventStore) -> Result<Id<AccountState>, espg::Error> {
+    let id = AccountState::id(uuid::Uuid::new_v4().to_string());
+    event_store.commit(&id, 1, Event::AccountOpened).await?;
+    Ok(id)
 }
 
-impl<'a> espg::Commands<'a, InMemoryEventStore<AccountState>, AccountState> for Commands<'a> {
-    fn new(event_store: &'a InMemoryEventStore<AccountState>) -> Self {
-        Self { event_store }
-    }
-
-    fn event_store(&'a self) -> &'a InMemoryEventStore<AccountState> {
-        self.event_store
-    }
+async fn deposit_money(
+    event_store: &impl EventStore,
+    id: &Id<AccountState>,
+    amount: i64,
+) -> Result<(), espg::Error> {
+    event_store.append(id, Event::MoneyDeposited(amount)).await
 }
 
-impl<'a> Commands<'a> {
-    async fn open_account(&'a self) -> Result<Id<AccountState>, espg::Error> {
-        let id = AccountState::id(uuid::Uuid::new_v4().to_string());
-        self.commit(&id, 1, Event::AccountOpened).await?;
-        Ok(id)
-    }
-
-    async fn deposit_money(
-        &'a self,
-        id: &Id<AccountState>,
-        amount: i64,
-    ) -> Result<(), espg::Error> {
-        self.append(id, Event::MoneyDeposited(amount)).await
-    }
-
-    async fn withdraw_money(
-        &'a self,
-        id: &Id<AccountState>,
-        amount: i64,
-    ) -> Result<(), espg::Error> {
-        self.retry_on_version_conflict(|| async {
+async fn withdraw_money(
+    event_store: &impl EventStore,
+    id: &Id<AccountState>,
+    amount: i64,
+) -> Result<(), espg::Error> {
+    event_store
+        .retry_on_version_conflict(|| async {
             #[allow(clippy::unwrap_used)]
-            let commit = self.event_store.get_commit(id).await.unwrap();
-            self.event_store
+            let commit = event_store.get_commit(id).await.unwrap();
+            event_store
                 .commit(id, commit.version + 1, Event::MoneyWithdrawn(amount))
                 .await
         })
         .await
-    }
+}
 
-    async fn close_account(&'a self, id: &Id<AccountState>) -> Result<(), espg::Error> {
-        self.append(id, Event::AccountClosed).await
-    }
+async fn close_account(
+    event_store: &impl EventStore,
+    id: &Id<AccountState>,
+) -> Result<(), espg::Error> {
+    event_store.append(id, Event::AccountClosed).await
 }
 
 #[tokio::main]
@@ -105,24 +92,22 @@ async fn main() -> espg::Result<()> {
     let mut active_accounts = 0;
     let mut total_balance = 0;
 
-    let event_store: InMemoryEventStore<AccountState> = InMemoryEventStore::default();
-    let stream = event_store.clone().stream().await?;
+    let event_store = InMemoryEventStore::default();
+    let stream = event_store.clone().stream::<AccountState>().await?;
 
-    let commands = Commands::new(&event_store);
-    let id = commands.open_account().await?;
-    commands.deposit_money(&id, 100).await?;
-    commands.withdraw_money(&id, 50).await?;
-    let id2 = commands.open_account().await?;
-    commands.deposit_money(&id2, 200).await?;
-    commands.close_account(&id2).await?;
+    let id = open_account(&event_store).await?;
+    deposit_money(&event_store, &id, 100).await?;
+    withdraw_money(&event_store, &id, 50).await?;
+    let id2 = open_account(&event_store).await?;
+    deposit_money(&event_store, &id2, 200).await?;
+    close_account(&event_store, &id2).await?;
 
     let thread_b = {
         let event_store = event_store.clone();
         tokio::spawn(async move {
-            let commands = Commands::new(&event_store);
-            let id = commands.open_account().await?;
-            commands.deposit_money(&id, 100).await?;
-            commands.withdraw_money(&id, 50).await?;
+            let id = open_account(&event_store).await?;
+            deposit_money(&event_store, &id, 100).await?;
+            withdraw_money(&event_store, &id, 50).await?;
 
             espg::Result::Ok(())
         })
