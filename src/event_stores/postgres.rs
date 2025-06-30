@@ -96,7 +96,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
             .client
             .query(
                 "SELECT version, action FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version > $3 ORDER BY version",
-                &[&id.0, &X::name(), &(version as i32)],
+                &[&id.0, &X::NAME, &(version as i32)],
             )
             .await?;
 
@@ -164,7 +164,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
         self.client
             .execute(
                 "INSERT INTO events (aggregate_id, aggregate_type, version, action) VALUES ($1, $2, $3, $4)",
-                &[&id.0, &X::name(), &(version as i32), &json_action],
+                &[&id.0, &X::NAME, &(version as i32), &json_action],
             )
             .await
             .map_err(|e| {
@@ -200,7 +200,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (aggregate_id, aggregate_type, key) DO UPDATE SET version = EXCLUDED.version, snapshot = EXCLUDED.snapshot
         "#,
-                &[&id.0, &X::name(), &key, &(version as i32), &snapshot],
+                &[&id.0, &X::NAME, &key, &(version as i32), &snapshot],
             )
             .await?;
         Ok(())
@@ -214,7 +214,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
                 .client
                 .query_opt(
                     "SELECT version, snapshot FROM snapshots WHERE aggregate_id = $1 AND aggregate_type = $2 AND key = $3",
-                    &[&id.0, &X::name(), &key],
+                    &[&id.0, &X::NAME, &key],
                 )
                 .await?;
 
@@ -273,13 +273,10 @@ pub struct PostgresEventStream {
 #[cfg(feature = "streaming")]
 impl PostgresEventStream {
     pub async fn new(
-        client: tokio_postgres::Client,
-        connection: tokio_postgres::Connection<
-            tokio_postgres::Socket,
-            tokio_postgres::tls::NoTlsStream,
-        >,
-    ) -> Self {
-        PostgresEventStream { client, connection }
+        config: tokio_postgres::Config,
+    ) -> std::result::Result<Self, tokio_postgres::Error> {
+        let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
+        Ok(PostgresEventStream { client, connection })
     }
 
     #[mutants::skip]
@@ -313,7 +310,7 @@ impl PostgresEventStream {
             let rows = client
             .query(
                 r#"SELECT aggregate_id, "version", action FROM events WHERE aggregate_type = $1"#,
-                &[&T::name()],
+                &[&T::NAME],
             )
             .await.expect("Failed to query events");
 
@@ -344,7 +341,7 @@ impl PostgresEventStream {
             }
         }
         let mut hasher = Md5::new();
-        hasher.update(format!("events:{}", T::name()).as_bytes());
+        hasher.update(format!("events:{}", T::NAME).as_bytes());
         let channel = format!("{:x}", hasher.finalize());
 
         eprintln!("Listening for notifications on channel: {}", channel);
@@ -369,7 +366,7 @@ impl PostgresEventStream {
                         let rows = client
                         .query(
                             r#"SELECT aggregate_id, "version", action FROM events WHERE aggregate_type = $1 AND version > $2 AND aggregate_id = $3 ORDER BY version"#,
-                            &[&T::name(), &max_version, &aggregate_id.0],
+                            &[&T::NAME, &max_version, &aggregate_id.0],
                         )
                         .await.expect("Failed to query events");
 
@@ -530,10 +527,11 @@ mod tests {
     async fn init_event_stream(
         db_name: Option<&str>,
     ) -> std::result::Result<impl Stream<Item = Commit<Event>> + use<>, tokio_postgres::Error> {
-        let (client, Some(connection)) = init_conn(db_name, false).await? else {
-            panic!("Failed to initialize Postgres connection");
-        };
-        let es = PostgresEventStream::new(client, connection).await;
+        let conn_string = get_connection_string(db_name).await?;
+        let config: tokio_postgres::Config = conn_string
+            .parse()
+            .expect("Failed to parse Postgres config");
+        let es = PostgresEventStream::new(config).await?;
         Ok(es
             .stream::<State>()
             .await

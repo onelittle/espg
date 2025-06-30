@@ -16,6 +16,7 @@ pub use event_stores::{EventStream, StreamingEventStore};
 pub use event_stores::postgres::PostgresEventStream;
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use serde::{Deserialize, Serialize};
 
@@ -33,6 +34,7 @@ mod tests {
     }
 
     impl Aggregate for State {
+        const NAME: &'static str = "espg::tests::State";
         type Event = Event;
 
         fn reduce(mut self, event: &Self::Event) -> Self {
@@ -110,13 +112,14 @@ mod tests {
 
     #[test]
     fn test_name() {
-        assert_eq!(State::name(), "espg::tests::State");
+        assert_eq!(State::NAME, "espg::tests::State");
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 #[allow(clippy::unwrap_used)]
+#[cfg(feature = "postgres")]
 mod test_helper {
     use tokio::io::AsyncReadExt;
 

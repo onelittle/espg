@@ -16,6 +16,7 @@ enum Event {
 }
 
 impl Aggregate for AccountState {
+    const NAME: &'static str = "AccountState";
     type Event = Event;
 
     fn reduce(mut self, event: &Self::Event) -> Self {

@@ -24,10 +24,8 @@ where
 {
     type Event: Clone + Send + Sync + 'static + DeserializeOwned + serde::Serialize;
 
-    // TODO: make this a const fn when stable
-    fn name() -> &'static str {
-        std::any::type_name::<Self>()
-    }
+    const NAME: &'static str;
+
     fn reduce(self, event: &Self::Event) -> Self;
     fn from_slice(events: &[Self::Event]) -> Self
     where

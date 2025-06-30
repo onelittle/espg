@@ -21,6 +21,7 @@ enum Event {
 }
 
 impl Aggregate for AccountState {
+    const NAME: &'static str = "AccountState";
     type Event = Event;
 
     fn reduce(mut self, event: &Self::Event) -> Self {
@@ -95,11 +96,13 @@ async fn close_account(
 #[allow(clippy::expect_used)]
 async fn init_event_stream() -> impl Stream<Item = Commit<Event>> {
     let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
-    let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
-        .await
-        .expect("Failed to connect to Postgres");
+    let config: tokio_postgres::Config = connection_string
+        .parse()
+        .expect("Failed to parse Postgres config");
 
-    let es = PostgresEventStream::new(client, connection).await;
+    let es = PostgresEventStream::new(config)
+        .await
+        .expect("Failed to create Postgres event stream");
     es.stream::<AccountState>()
         .await
         .expect("Failed to create event stream")
