@@ -99,7 +99,7 @@ async fn init_event_stream() -> impl Stream<Item = Commit<Event>> {
         .await
         .expect("Failed to connect to Postgres");
 
-    let es = PostgresEventStream::<AccountState>::new(client, connection).await;
+    let es = PostgresEventStream::new(client, connection).await;
     es.stream::<AccountState>()
         .await
         .expect("Failed to create event stream")

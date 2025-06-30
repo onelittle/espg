@@ -10,8 +10,6 @@ use async_trait::async_trait;
 use futures::Stream;
 #[cfg(feature = "streaming")]
 use futures_channel::mpsc;
-#[cfg(feature = "streaming")]
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_postgres::{GenericClient, types::Json};
 
@@ -266,18 +264,14 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
 }
 
 #[cfg(feature = "streaming")]
-pub struct PostgresEventStream<T: Aggregate> {
+pub struct PostgresEventStream {
     client: tokio_postgres::Client,
     connection:
         tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
-    marker: std::marker::PhantomData<T>,
 }
 
 #[cfg(feature = "streaming")]
-impl<T: Aggregate> PostgresEventStream<T>
-where
-    T::Event: DeserializeOwned + Send + 'static,
-{
+impl PostgresEventStream {
     pub async fn new(
         client: tokio_postgres::Client,
         connection: tokio_postgres::Connection<
@@ -285,15 +279,11 @@ where
             tokio_postgres::tls::NoTlsStream,
         >,
     ) -> Self {
-        PostgresEventStream {
-            client,
-            connection,
-            marker: std::marker::PhantomData,
-        }
+        PostgresEventStream { client, connection }
     }
 
     #[mutants::skip]
-    async fn listen(
+    async fn listen<T: Aggregate>(
         client: tokio_postgres::Client,
         mut connection: tokio_postgres::Connection<
             tokio_postgres::Socket,
@@ -355,11 +345,13 @@ where
         }
         let mut hasher = Md5::new();
         hasher.update(format!("events:{}", T::name()).as_bytes());
-        let result = hasher.finalize();
-        let result = format!("{:x}", result);
+        let channel = format!("{:x}", hasher.finalize());
+
+        eprintln!("Listening for notifications on channel: {}", channel);
+
         #[allow(clippy::expect_used)]
         client
-            .batch_execute(&format!("LISTEN {};", result))
+            .batch_execute(&format!(r#"LISTEN "{channel}";"#))
             .await
             .expect("Failed to listen for notifications");
 
@@ -423,10 +415,10 @@ where
 }
 
 #[cfg(feature = "streaming")]
-impl<T: Aggregate> StreamingEventStore for PostgresEventStream<T> {
+impl StreamingEventStore for PostgresEventStream {
     async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = Commit<X::Event>>> {
         let client = self.client;
-        let rx2 = PostgresEventStream::<X>::listen(client, self.connection).await;
+        let rx2 = PostgresEventStream::listen::<X>(client, self.connection).await;
         #[allow(clippy::expect_used)]
         Ok(EventStream::new(rx2, ()))
     }
@@ -541,7 +533,7 @@ mod tests {
         let (client, Some(connection)) = init_conn(db_name, false).await? else {
             panic!("Failed to initialize Postgres connection");
         };
-        let es = PostgresEventStream::<State>::new(client, connection).await;
+        let es = PostgresEventStream::new(client, connection).await;
         Ok(es
             .stream::<State>()
             .await

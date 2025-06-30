@@ -144,5 +144,5 @@ pub trait EventStore: Sync {
 #[allow(async_fn_in_trait)]
 pub trait StreamingEventStore {
     #[cfg(feature = "streaming")]
-    async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = Commit<X::Event>>>;
+    async fn stream<T: Aggregate>(self) -> Result<impl Stream<Item = Commit<T::Event>>>;
 }
