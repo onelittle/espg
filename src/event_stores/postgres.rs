@@ -64,6 +64,10 @@ pub async fn initialize(
         .await?;
 
     client
+        .batch_execute(super::sql_helpers::CREATE_SUBSCRIPTIONS)
+        .await?;
+
+    client
         .batch_execute(super::sql_helpers::CREATE_TRIGGER)
         .await?;
 
@@ -79,6 +83,23 @@ pub async fn clear(
             r#"
             DELETE FROM events;
             DELETE FROM snapshots;
+            DELETE FROM subscriptions;
+        "#,
+        )
+        .await?;
+    Ok(())
+}
+
+#[mutants::skip]
+pub async fn destroy(
+    client: &tokio_postgres::Client,
+) -> std::result::Result<(), tokio_postgres::Error> {
+    client
+        .batch_execute(
+            r#"
+            DROP TABLE IF EXISTS events;
+            DROP TABLE IF EXISTS snapshots;
+            DROP TABLE IF EXISTS subscriptions;
         "#,
         )
         .await?;
@@ -95,15 +116,20 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
         let rows = self
             .client
             .query(
-                "SELECT version, action FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version > $3 ORDER BY version",
+                "SELECT version, action, global_seq::text FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version > $3 ORDER BY version",
                 &[&id.0, &X::NAME, &(version as i32)],
             )
             .await?;
 
-        let version = rows
+        let (version, global_seq) = rows
             .last()
-            .map(|row| row.get::<_, i32>(0) as usize)
-            .unwrap_or(version);
+            .map(|row| {
+                let version: i32 = row.get(0);
+                let global_seq: String = row.get(2);
+                let global_seq: u64 = global_seq.parse().expect("Failed to parse global_seq");
+                (version as usize, Some(global_seq as i64))
+            })
+            .unwrap_or((version, None));
 
         if version == 0 {
             return Err(Error::NotFound("No events found".to_string()));
@@ -120,6 +146,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
             version,
             diagnostics: None,
             inner: events,
+            global_seq,
         })
     }
 
@@ -136,6 +163,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
                         loaded_events: events.inner.len(),
                         snapshotted: true,
                     }),
+                    global_seq: None,
                     inner: events.inner.iter().fold(snapshot_commit.inner, X::reduce),
                 })
             }
@@ -148,6 +176,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
                         loaded_events: events.inner.len(),
                         snapshotted: false,
                     }),
+                    global_seq: None,
                     inner: X::from_slice(&events.inner),
                 })
             }
@@ -191,6 +220,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
             version,
             diagnostics: _,
             inner,
+            global_seq: _,
         } = self.try_get_commit(id).await?;
         let snapshot: Value = serde_json::to_value(inner)?;
         self.client
@@ -229,6 +259,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
                 loaded_events: 0,
                 snapshotted: true,
             }),
+            global_seq: None,
             inner,
         }))
     }
@@ -309,7 +340,7 @@ impl PostgresEventStream {
             #[allow(clippy::expect_used)]
             let rows = client
             .query(
-                r#"SELECT aggregate_id, "version", action FROM events WHERE aggregate_type = $1"#,
+                r#"SELECT aggregate_id, "version", action, global_seq FROM events WHERE aggregate_type = $1"#,
                 &[&T::NAME],
             )
             .await.expect("Failed to query events");
@@ -318,6 +349,8 @@ impl PostgresEventStream {
                 let aggregate_id: String = row.get(0);
                 let version: i32 = row.get(1);
                 let action: Json<T::Event> = row.get(2);
+                let global_seq: String = row.get(3);
+                let global_seq: i64 = global_seq.parse().expect("Failed to parse global_seq");
 
                 // Create a Commit from the row data
                 let commit = Commit {
@@ -325,6 +358,7 @@ impl PostgresEventStream {
                     version: version as usize,
                     diagnostics: None,
                     inner: action.0,
+                    global_seq: Some(global_seq),
                 };
 
                 // Update max_version_seen if this commit's version is greater
@@ -365,7 +399,7 @@ impl PostgresEventStream {
                         #[allow(clippy::expect_used)]
                         let rows = client
                         .query(
-                            r#"SELECT aggregate_id, "version", action FROM events WHERE aggregate_type = $1 AND version > $2 AND aggregate_id = $3 ORDER BY version"#,
+                            r#"SELECT aggregate_id, "version", action, global_seq FROM events WHERE aggregate_type = $1 AND version > $2 AND aggregate_id = $3 ORDER BY version"#,
                             &[&T::NAME, &max_version, &aggregate_id.0],
                         )
                         .await.expect("Failed to query events");
@@ -374,6 +408,9 @@ impl PostgresEventStream {
                             let aggregate_id: String = row.get(0);
                             let version: i32 = row.get(1);
                             let action: Json<T::Event> = row.get(2);
+                            let global_seq: String = row.get(3);
+                            let global_seq: i64 =
+                                global_seq.parse().expect("Failed to parse global_seq");
 
                             // Create a Commit from the row data
                             let commit = Commit {
@@ -381,6 +418,7 @@ impl PostgresEventStream {
                                 version: version as usize,
                                 diagnostics: None,
                                 inner: action.0,
+                                global_seq: Some(global_seq),
                             };
 
                             // Update max_version_seen if this commit's version is greater

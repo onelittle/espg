@@ -1,5 +1,8 @@
 mod aggregate;
 pub mod event_stores;
+#[cfg(feature = "streaming")]
+#[cfg(feature = "postgres")]
+mod subscriber;
 
 pub use aggregate::{Aggregate, Id};
 #[cfg(feature = "inmem")]
@@ -14,6 +17,10 @@ pub use event_stores::{EventStream, StreamingEventStore};
 #[cfg(feature = "streaming")]
 #[cfg(feature = "postgres")]
 pub use event_stores::postgres::PostgresEventStream;
+
+#[cfg(feature = "streaming")]
+#[cfg(feature = "postgres")]
+pub use subscriber::Subscriber;
 
 #[cfg(test)]
 #[allow(dead_code)]
@@ -121,11 +128,45 @@ mod tests {
 #[allow(clippy::unwrap_used)]
 #[cfg(feature = "postgres")]
 mod test_helper {
+    use std::ops::Deref;
+
     use tokio::io::AsyncReadExt;
 
     pub(crate) struct TestDb {
         pub(crate) name: String,
         _stream: tokio::net::UnixStream,
+    }
+
+    impl TestDb {
+        pub fn tokio_postgres_config(&self) -> tokio_postgres::Config {
+            let mut config = tokio_postgres::Config::new();
+            config.host("localhost").port(5432).dbname(&self.name);
+            config
+        }
+
+        pub async fn connect(
+            &self,
+        ) -> (
+            tokio_postgres::Client,
+            tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
+        ) {
+            let config = self.tokio_postgres_config();
+            config
+                .connect(tokio_postgres::NoTls)
+                .await
+                .expect("Failed to connect to test database")
+        }
+
+        pub async fn connect_and_discard_conn(&self) -> tokio_postgres::Client {
+            let (client, connection) = self.connect().await;
+            // Discard the connection to avoid blocking the test
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Connection error: {}", e);
+                }
+            });
+            client
+        }
     }
 
     pub(crate) async fn get_test_database() -> TestDb {
@@ -147,6 +188,8 @@ mod test_helper {
             let db_name = response.strip_prefix("OK:").unwrap().trim().to_string();
             // Remove embedded null characters
             let db_name = db_name.replace('\0', "");
+
+            eprintln!("Using test database: {}", db_name);
             return TestDb {
                 name: db_name.clone(),
                 _stream: stream,

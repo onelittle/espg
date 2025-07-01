@@ -79,6 +79,7 @@ impl InMemoryEventStore {
             version: commit.version,
             inner: serde_json::to_string(&commit.inner).expect("Failed to serialize event to JSON"),
             diagnostics: commit.diagnostics,
+            global_seq: commit.global_seq,
         };
         match &self.broadcast.send(commit) {
             Ok(_) => {}
@@ -105,6 +106,7 @@ impl EventStore for InMemoryEventStore {
             version, // Version is not used in this context
             inner: action,
             diagnostics: None,
+            global_seq: None, // Global sequence is not used in this context
         };
         #[cfg(feature = "streaming")]
         self.transmit::<X>(_commit).await?;
@@ -135,6 +137,7 @@ impl EventStore for InMemoryEventStore {
             version,
             inner: action,
             diagnostics: None,
+            global_seq: None, // Global sequence is not used in this context
         };
         #[cfg(feature = "streaming")]
         self.transmit::<X>(_commit).await?;
@@ -169,13 +172,13 @@ impl EventStore for InMemoryEventStore {
             version: stored_commit.0,
             diagnostics: None,
             inner,
+            global_seq: None, // Global sequence is not used in this context
         })
     }
 }
 
 #[cfg(feature = "streaming")]
 impl StreamingEventStore for InMemoryEventStore {
-    #[cfg(feature = "streaming")]
     async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = Commit<X::Event>>> {
         use tokio_stream::wrappers::{BroadcastStream, UnboundedReceiverStream};
         let rx = self.broadcast.subscribe();
@@ -197,6 +200,7 @@ impl StreamingEventStore for InMemoryEventStore {
                     version,
                     inner: event,
                     diagnostics: None,
+                    global_seq: None, // Global sequence is not used in this context
                 };
                 if tx1.send(commit).is_err() {
                     eprintln!("Stream closed, cannot send initial event");
@@ -219,6 +223,7 @@ impl StreamingEventStore for InMemoryEventStore {
                                     version: commit.version,
                                     inner: event,
                                     diagnostics: commit.diagnostics,
+                                    global_seq: commit.global_seq,
                                 };
                                 if tx1.send(commit).is_err() {
                                     eprintln!("Stream closed, cannot send event");

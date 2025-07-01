@@ -61,6 +61,7 @@ pub struct Commit<T> {
     pub version: usize,
     pub inner: T,
     pub diagnostics: Option<Diagnostics>,
+    pub global_seq: Option<i64>,
 }
 
 #[async_trait]
@@ -95,6 +96,7 @@ pub trait EventStore: Sync {
             version: events.version,
             inner: X::from_slice(&events.inner),
             diagnostics: None,
+            global_seq: events.global_seq,
         })
     }
     async fn get_commit<X: Aggregate>(&self, id: &Id<X>) -> Option<Commit<X>> {
