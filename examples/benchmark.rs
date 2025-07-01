@@ -99,7 +99,7 @@ async fn main() {
             let mut commands = Commands::new(&mut event_store_clone);
             let account_id = AccountState::id(format!("account{}", i + 100_000));
             commands.open_account(&account_id).await.unwrap();
-            for _ in 0..=(128_000 - 2) {
+            for _ in 0..=(512_000 - 2) {
                 commands.deposit_money(&account_id, 100).await.unwrap();
                 commands.withdraw_money(&account_id, 50).await.unwrap();
             }
@@ -113,10 +113,13 @@ async fn main() {
         handle.await.unwrap();
     }
 
+    let elapsed = instant.elapsed();
+    let event_count = event_store.len().await;
     println!(
-        "Write benchmark completed in {}ms - {} events written",
-        instant.elapsed().as_millis(),
-        event_store.len().await,
+        "Write benchmark completed in {}ms - {} events ({}ns/event) written",
+        elapsed.as_millis(),
+        event_count,
+        elapsed.as_nanos() / event_count as u128
     );
     let instant = std::time::Instant::now();
 

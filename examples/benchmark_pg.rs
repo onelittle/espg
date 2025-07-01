@@ -45,11 +45,11 @@ impl Aggregate for AccountState {
 }
 
 struct Commands<'a> {
-    event_store: &'a mut PostgresEventStore<'a, tokio_postgres::Client>,
+    event_store: &'a PostgresEventStore<'a, tokio_postgres::Client>,
 }
 
 impl<'a> Commands<'a> {
-    fn new(event_store: &'a mut PostgresEventStore<'a, tokio_postgres::Client>) -> Self {
+    fn new(event_store: &'a PostgresEventStore<'a, tokio_postgres::Client>) -> Self {
         Commands { event_store }
     }
 
@@ -96,8 +96,8 @@ async fn main() -> espg::Result<()> {
         }
     });
 
+    espg::event_stores::postgres::destroy(&client).await?;
     espg::event_stores::postgres::initialize(&client).await?;
-    espg::event_stores::postgres::clear(&client).await?;
 
     println!("Starting benchmark...");
     // Initialize the event store
@@ -118,16 +118,18 @@ async fn main() -> espg::Result<()> {
                 }
             });
 
-            let mut event_store_clone = PostgresEventStore::new(&client);
+            let event_store_clone = PostgresEventStore::new(&client);
 
-            let mut commands = Commands::new(&mut event_store_clone);
-            let account_id = AccountState::id(format!("account{}", i + 100_000));
-            commands.open_account(&account_id).await.unwrap();
-            for _ in 0..=(128_000 - 2) {
-                commands.deposit_money(&account_id, 100).await.unwrap();
-                commands.withdraw_money(&account_id, 50).await.unwrap();
+            {
+                let mut commands = Commands::new(&event_store_clone);
+                let account_id = AccountState::id(format!("account{}", i + 100_000));
+                commands.open_account(&account_id).await.unwrap();
+                for _ in 0..=(2048 - 2) {
+                    commands.deposit_money(&account_id, 100).await.unwrap();
+                    commands.withdraw_money(&account_id, 50).await.unwrap();
+                }
+                commands.close_account(&account_id).await.unwrap();
             }
-            commands.close_account(&account_id).await.unwrap();
         });
         handles.push(handle);
     }
@@ -137,10 +139,13 @@ async fn main() -> espg::Result<()> {
         handle.await.unwrap();
     }
 
+    let elapsed = instant.elapsed();
+    let event_count = event_store.len().await;
     println!(
-        "Write benchmark completed in {}ms - {} events written",
-        instant.elapsed().as_millis(),
-        event_store.len().await,
+        "Write benchmark completed in {}ms - {} events ({}µs/event) written",
+        elapsed.as_millis(),
+        event_count,
+        elapsed.as_micros() / event_count as u128
     );
     let instant = std::time::Instant::now();
 
