@@ -20,7 +20,7 @@ pub use event_stores::postgres::PostgresEventStream;
 
 #[cfg(feature = "streaming")]
 #[cfg(feature = "postgres")]
-pub use subscriber::Subscriber;
+pub use subscriber::{Subscriber, Subscription};
 
 #[cfg(test)]
 #[allow(dead_code)]

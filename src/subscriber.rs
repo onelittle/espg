@@ -1,22 +1,35 @@
-use crate::{Aggregate, Commit, EventStore};
-use async_trait::async_trait;
+use crate::{Aggregate, Commit, EventStore, PostgresEventStore};
 use futures::StreamExt;
+use tokio_postgres::GenericClient;
 use tokio_util::sync::CancellationToken;
 
-#[async_trait]
+pub struct Subscription {
+    cancellation_token: CancellationToken,
+}
+
+impl Subscription {
+    pub fn cancel(self) {
+        self.cancellation_token.cancel();
+    }
+}
+
 pub trait Subscriber<T: Aggregate + 'static> {
     const NAME: &'static str;
 
-    async fn handle_event(
+    fn handle_event(
         &self,
         store: &impl EventStore,
         commit: Commit<T::Event>,
-    ) -> crate::Result<()>;
+    ) -> impl std::future::Future<Output = ()> + std::marker::Send;
 
     #[cfg(test)]
-    async fn tick(&self);
+    fn tick(&self) -> impl std::future::Future<Output = ()> + std::marker::Send {
+        // Default implementation does nothing
+        async {}
+    }
 
-    async fn start(self, config: tokio_postgres::Config) -> crate::Result<CancellationToken>
+    #[allow(async_fn_in_trait)]
+    async fn start(self, config: tokio_postgres::Config) -> crate::Result<Subscription>
     where
         Self: Sized + Send + 'static,
     {
@@ -34,12 +47,8 @@ pub trait Subscriber<T: Aggregate + 'static> {
         });
 
         // Make sure the row is present in the database so we can lock it
-        client
-            .execute(
-                "INSERT INTO subscriptions (name, aggregate_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                &[&Self::NAME, &T::NAME],
-            )
-            .await?;
+        let event_store = PostgresEventStore::new(&client);
+        event_store.ensure_subscription(&self).await?;
 
         tokio::spawn(async move {
             use tokio::select;
@@ -95,7 +104,31 @@ pub trait Subscriber<T: Aggregate + 'static> {
             Ok::<(), crate::Error>(())
         });
 
-        Ok(parent_token)
+        Ok(Subscription {
+            cancellation_token: parent_token,
+        })
+    }
+}
+
+trait SubscriberExt {
+    async fn ensure_subscription<T: Aggregate + 'static, S: Subscriber<T>>(
+        &self,
+        subscriber: &S,
+    ) -> crate::Result<()>;
+}
+
+impl<'a, Db: GenericClient> SubscriberExt for PostgresEventStore<'a, Db> {
+    async fn ensure_subscription<T: Aggregate + 'static, S: Subscriber<T>>(
+        &self,
+        _: &S,
+    ) -> crate::Result<()> {
+        self.client
+            .execute(
+                "INSERT INTO subscriptions (name, aggregate_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                &[&S::NAME, &T::NAME],
+            )
+            .await?;
+        Ok(())
     }
 }
 
@@ -118,7 +151,6 @@ mod tests {
         tick: Arc<Mutex<usize>>,
     }
 
-    #[async_trait]
     impl Subscriber<State> for TestSubscriber {
         const NAME: &'static str = "TestSubscriber";
 
@@ -127,14 +159,9 @@ mod tests {
             *val += 1;
         }
 
-        async fn handle_event(
-            &self,
-            _store: &impl EventStore,
-            _commit: Commit<Event>,
-        ) -> Result<()> {
+        async fn handle_event(&self, _store: &impl EventStore, _commit: Commit<Event>) {
             let mut val = self.invocations.lock().await;
             *val += 1;
-            Ok(())
         }
     }
 
@@ -203,8 +230,8 @@ mod tests {
         }
 
         for handle in handles {
-            let token = handle.await.unwrap();
-            token.cancel();
+            let subscription = handle.await.unwrap();
+            subscription.cancel();
         }
 
         assert_eq!(*tick.lock().await, 30);

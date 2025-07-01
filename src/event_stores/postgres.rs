@@ -14,7 +14,7 @@ use serde_json::Value;
 use tokio_postgres::{GenericClient, types::Json};
 
 pub struct PostgresEventStore<'a, Db: GenericClient> {
-    client: &'a Db,
+    pub(crate) client: &'a Db,
     snapshot_interval: usize,
 }
 

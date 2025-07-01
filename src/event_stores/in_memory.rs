@@ -186,6 +186,7 @@ impl StreamingEventStore for InMemoryEventStore {
         let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel::<Commit<X::Event>>();
         let store = self.store.read().await;
         let stream2 = UnboundedReceiverStream::new(rx1);
+        let mut global_seq = 0;
 
         for (id, (_, events)) in store.iter() {
             for (version_index, event) in events.iter().enumerate() {
@@ -200,8 +201,9 @@ impl StreamingEventStore for InMemoryEventStore {
                     version,
                     inner: event,
                     diagnostics: None,
-                    global_seq: None, // Global sequence is not used in this context
+                    global_seq: Some(global_seq), // Global sequence is not used in this context
                 };
+                global_seq += 1;
                 if tx1.send(commit).is_err() {
                     eprintln!("Stream closed, cannot send initial event");
                 }
@@ -223,8 +225,9 @@ impl StreamingEventStore for InMemoryEventStore {
                                     version: commit.version,
                                     inner: event,
                                     diagnostics: commit.diagnostics,
-                                    global_seq: commit.global_seq,
+                                    global_seq: Some(global_seq),
                                 };
+                                global_seq += 1;
                                 if tx1.send(commit).is_err() {
                                     eprintln!("Stream closed, cannot send event");
                                 }
