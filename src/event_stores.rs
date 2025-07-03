@@ -124,7 +124,7 @@ pub trait EventStore: Sync {
         Ok(None)
     }
 
-    async fn retry_on_version_conflict<'a, 'b, F, Fut, R>(&'a self, mut f: F) -> Result<()>
+    async fn retry_on_version_conflict<'a, 'b, F, Fut, R>(&'a self, mut f: F) -> Result<R>
     where
         F: FnMut() -> Fut + Send + 'b,
         Fut: std::future::Future<Output = Result<R>> + Send + 'b,
@@ -132,7 +132,7 @@ pub trait EventStore: Sync {
     {
         loop {
             match f().await {
-                Ok(_) => return Ok(()),
+                Ok(res) => return Ok(res),
                 Err(Error::VersionConflict(_)) => {
                     eprintln!("Version conflict occurred, retrying...");
                 }
