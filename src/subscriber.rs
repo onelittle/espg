@@ -34,7 +34,7 @@ pub trait Subscriber<T: Aggregate + 'static> {
         &self,
         store: &impl EventStore,
         commit: Commit<T::Event>,
-    ) -> impl std::future::Future<Output = ()> + std::marker::Send;
+    ) -> impl std::future::Future<Output = crate::Result<()>> + std::marker::Send;
 
     #[cfg(test)]
     fn tick(&self) -> impl std::future::Future<Output = ()> + std::marker::Send {
@@ -124,13 +124,12 @@ pub trait Subscriber<T: Aggregate + 'static> {
                         }
 
                         let store = PostgresEventStore::new(&tx);
-                        subscriber.handle_event(&store, commit).await;
+                        subscriber.handle_event(&store, commit).await?;
 
                         let commit_last_seq: String = commit_last_seq.to_string();
                         #[allow(clippy::expect_used)]
-                        tx.execute("UPDATE subscriptions SET last_seq = $1::text WHERE name = $2 AND aggregate_type = $3", &[&commit_last_seq, &Self::NAME, &T::NAME]).await.expect("Failed to update subscription last_seq");
-                        #[allow(clippy::expect_used)]
-                        tx.commit().await.expect("Failed to commit transaction");
+                        tx.execute("UPDATE subscriptions SET last_seq = $1::text WHERE name = $2 AND aggregate_type = $3", &[&commit_last_seq, &Self::NAME, &T::NAME]).await?;
+                        tx.commit().await?;
                     }
                 }
             }
@@ -210,7 +209,7 @@ pub trait Subscriber<T: Aggregate + 'static> {
                             continue; // Skip already processed events
                         }
 
-                        subscriber.handle_event(&event_store, commit).await;
+                        subscriber.handle_event(&event_store, commit).await?;
 
                         // Update the offset for the subscription
                         *offset = commit_seq;
@@ -256,9 +255,14 @@ mod tests {
             *val += 1;
         }
 
-        async fn handle_event(&self, _store: &impl EventStore, _commit: Commit<Event>) {
+        async fn handle_event(
+            &self,
+            _store: &impl EventStore,
+            _commit: Commit<Event>,
+        ) -> Result<()> {
             let mut val = self.invocations.lock().await;
             *val += 1;
+            Ok(())
         }
     }
 
