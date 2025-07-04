@@ -1,5 +1,6 @@
 use espg::{
-    Aggregate, Commit, EventStore, Id, PostgresEventStore, PostgresEventStream, StreamingEventStore,
+    Aggregate, EventStore, Id, PostgresEventStore, PostgresEventStream, StreamingEventStore,
+    event_stores::StreamItem,
 };
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -94,7 +95,7 @@ async fn close_account(
 }
 
 #[allow(clippy::expect_used)]
-async fn init_event_stream() -> impl Stream<Item = Commit<Event>> {
+async fn init_event_stream() -> impl Stream<Item = StreamItem<Event>> {
     let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
     let config: tokio_postgres::Config = connection_string
         .parse()
@@ -153,6 +154,11 @@ async fn main() -> espg::Result<()> {
     let mut n = 0;
     let mut stream = stream.take(8);
     while let Some(commit) = stream.next().await {
+        let Ok(commit) = commit else {
+            eprintln!("Error processing event stream");
+            break;
+        };
+
         n += 1;
         eprintln!("Received event number {}", n);
         let event = commit.inner;

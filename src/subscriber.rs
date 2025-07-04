@@ -2,15 +2,28 @@
 use crate::event_stores::InMemoryEventStore;
 use crate::{Aggregate, Commit, EventStore};
 use futures::StreamExt;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub struct Subscription {
     cancellation_token: CancellationToken,
+    pub handle: JoinHandle<crate::Result<()>>,
 }
 
 impl Subscription {
-    pub fn cancel(self) {
+    pub async fn cancel(self) -> crate::Result<()> {
         self.cancellation_token.cancel();
+        match self.handle.await {
+            Ok(result) => result,
+            Err(e) => match e.try_into_panic() {
+                Ok(panic) => {
+                    panic!("Subscriber panicked: {:?}", panic);
+                }
+                Err(_) => {
+                    panic!("Subscriber task was cancelled");
+                }
+            },
+        }
     }
 }
 
@@ -56,7 +69,7 @@ pub trait Subscriber<T: Aggregate + 'static> {
             )
             .await?;
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             use tokio::select;
 
             let subscriber = self;
@@ -74,51 +87,60 @@ pub trait Subscriber<T: Aggregate + 'static> {
                         break;
                     }
                     commit = stream.next() => {
-                        if let Some(commit) = commit {
-                            let tx = client.transaction().await?;
-                            let row = tx.query_one(r#"
-                                SELECT last_seq::text AS last_seq
-                                FROM subscriptions
-                                WHERE name = $1
-                                  AND aggregate_type = $2
-                                FOR UPDATE
-                            "#, &[&Self::NAME, &T::NAME]).await?;
+                        let Some(commit) = commit else {
+                            eprintln!("Stream ended, exiting subscriber");
+                            break; // Exit if the stream ends
+                        };
 
-                            #[cfg(test)]
-                            subscriber.tick().await;
-
-                            let last_seq_string: String = row.get(0);
-                            let last_seq: Txid = last_seq_string.into();
-                            let Some(commit_last_seq) = commit.global_seq else {
-                                eprintln!("Commit without global sequence, skipping");
-                                continue; // Skip commits without a global sequence
-                            };
-
-                            if commit_last_seq <= last_seq {
-                                let _ = tx.rollback().await;
-                                continue;
+                        let commit = match commit {
+                            Ok(commit) => commit,
+                            Err(e) => {
+                                return Err(crate::Error::StreamingError(e));
                             }
+                        };
 
-                            let store = PostgresEventStore::new(&tx);
-                            subscriber.handle_event(&store, commit).await;
+                        let tx = client.transaction().await?;
+                        let row = tx.query_one(r#"
+                            SELECT last_seq::text AS last_seq
+                            FROM subscriptions
+                            WHERE name = $1
+                                AND aggregate_type = $2
+                            FOR UPDATE
+                        "#, &[&Self::NAME, &T::NAME]).await?;
 
-                            let commit_last_seq: String = commit_last_seq.to_string();
-                            #[allow(clippy::expect_used)]
-                            tx.execute("UPDATE subscriptions SET last_seq = $1::text WHERE name = $2 AND aggregate_type = $3", &[&commit_last_seq, &Self::NAME, &T::NAME]).await.expect("Failed to update subscription last_seq");
-                            #[allow(clippy::expect_used)]
-                            tx.commit().await.expect("Failed to commit transaction");
-                        } else {
-                            break;
+                        #[cfg(test)]
+                        subscriber.tick().await;
+
+                        let last_seq_string: String = row.get(0);
+                        let last_seq: Txid = last_seq_string.into();
+                        let Some(commit_last_seq) = commit.global_seq else {
+                            eprintln!("Commit without global sequence, skipping");
+                            continue; // Skip commits without a global sequence
+                        };
+
+                        if commit_last_seq <= last_seq {
+                            let _ = tx.rollback().await;
+                            continue;
                         }
+
+                        let store = PostgresEventStore::new(&tx);
+                        subscriber.handle_event(&store, commit).await;
+
+                        let commit_last_seq: String = commit_last_seq.to_string();
+                        #[allow(clippy::expect_used)]
+                        tx.execute("UPDATE subscriptions SET last_seq = $1::text WHERE name = $2 AND aggregate_type = $3", &[&commit_last_seq, &Self::NAME, &T::NAME]).await.expect("Failed to update subscription last_seq");
+                        #[allow(clippy::expect_used)]
+                        tx.commit().await.expect("Failed to commit transaction");
                     }
                 }
             }
 
-            Ok::<(), crate::Error>(())
+            Ok(())
         });
 
         Ok(Subscription {
             cancellation_token: parent_token,
+            handle,
         })
     }
 
@@ -146,7 +168,7 @@ pub trait Subscriber<T: Aggregate + 'static> {
 
         let mut stream = event_store.clone().stream::<T>().await?;
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             use tokio::select;
 
             let subscriber = self;
@@ -160,8 +182,17 @@ pub trait Subscriber<T: Aggregate + 'static> {
                     }
                     commit = stream.next() => {
                         let Some(commit) = commit else {
-                            break;
+                            eprintln!("Stream ended, exiting subscriber");
+                            break; // Exit if the stream ends
                         };
+
+                        let commit = match commit {
+                            Ok(commit) => commit,
+                            Err(e) => {
+                                return Err(crate::Error::StreamingError(e));
+                            }
+                        };
+
                         let Some(commit_seq) = commit.global_seq else {
                             eprintln!("Commit without global sequence, skipping");
                             continue; // Skip commits without a global sequence
@@ -187,11 +218,12 @@ pub trait Subscriber<T: Aggregate + 'static> {
                 }
             }
 
-            Ok::<(), crate::Error>(())
+            Ok(())
         });
 
         Ok(Subscription {
             cancellation_token: parent_token,
+            handle,
         })
     }
 }
@@ -274,16 +306,14 @@ mod tests {
         let event_store = PostgresEventStore::new(&client);
         let invocations = Arc::new(Mutex::new(0));
         let tick = Arc::new(Mutex::new(0));
-        let mut handles = vec![];
+        let mut subscriptions = vec![];
         for _ in 0..3 {
             let invocations = invocations.clone();
             let tick = tick.clone();
             let config = config.clone();
-            let handle = tokio::task::spawn(async move {
-                let subscriber = TestSubscriber { invocations, tick };
-                subscriber.start_postgres(config).await.unwrap()
-            });
-            handles.push(handle);
+            let subscriber = TestSubscriber { invocations, tick };
+            let sub = subscriber.start_postgres(config).await?;
+            subscriptions.push(sub);
         }
 
         let id = State::id("test_state");
@@ -296,9 +326,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        for handle in handles {
-            let subscription = handle.await.unwrap();
-            subscription.cancel();
+        for subscription in subscriptions {
+            subscription.cancel().await?;
         }
 
         assert_eq!(*tick.lock().await, 30);
@@ -335,16 +364,14 @@ mod tests {
         let event_store = InMemoryEventStore::default();
         let invocations = Arc::new(Mutex::new(0));
         let tick = Arc::new(Mutex::new(0));
-        let mut handles = vec![];
+        let mut subscriptions = vec![];
         for _ in 0..3 {
             let invocations = invocations.clone();
             let tick = tick.clone();
             let event_store = event_store.clone();
-            let handle = tokio::task::spawn(async move {
-                let subscriber = TestSubscriber { invocations, tick };
-                subscriber.start_inmem(event_store).await.unwrap()
-            });
-            handles.push(handle);
+            let subscriber = TestSubscriber { invocations, tick };
+            let sub = subscriber.start_inmem(event_store).await.unwrap();
+            subscriptions.push(sub);
         }
 
         let id = State::id("test_state");
@@ -357,9 +384,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        for handle in handles {
-            let subscription = handle.await.unwrap();
-            subscription.cancel();
+        for subscription in subscriptions {
+            subscription.cancel().await?;
         }
 
         assert_eq!(*tick.lock().await, 30);

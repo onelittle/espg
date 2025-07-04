@@ -5,7 +5,7 @@ use crate::{
     util::Txid,
 };
 #[cfg(feature = "streaming")]
-use crate::{EventStream, StreamingEventStore};
+use crate::{EventStream, StreamingEventStore, event_stores::StreamItem};
 use async_trait::async_trait;
 #[cfg(feature = "streaming")]
 use futures::Stream;
@@ -318,7 +318,7 @@ impl PostgresEventStream {
             tokio_postgres::Socket,
             tokio_postgres::tls::NoTlsStream,
         >,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<Commit<T::Event>> {
+    ) -> tokio::sync::mpsc::UnboundedReceiver<StreamItem<T::Event>> {
         use std::collections::HashMap;
 
         use futures::FutureExt;
@@ -334,7 +334,7 @@ impl PostgresEventStream {
         let connection = stream.forward(tx).map(|r| r.unwrap());
         tokio::spawn(connection);
 
-        let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel::<Commit<T::Event>>();
+        let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel();
         let mut max_versions_seen: HashMap<String, i32> = Default::default();
         {
             let tx2 = tx2.clone();
@@ -369,7 +369,7 @@ impl PostgresEventStream {
                     .or_insert(version);
 
                 // Send the commit to the channel
-                if tx2.send(commit).is_err() {
+                if tx2.send(Ok(commit)).is_err() {
                     eprintln!("Stream closed, cannot send event");
                     break;
                 }
@@ -397,13 +397,25 @@ impl PostgresEventStream {
                         let max_version =
                             max_versions_seen.get(&aggregate_id.0).cloned().unwrap_or(0);
 
-                        #[allow(clippy::expect_used)]
                         let rows = client
                         .query(
                             r#"SELECT aggregate_id, "version", action, global_seq FROM events WHERE aggregate_type = $1 AND version > $2 AND aggregate_id = $3 ORDER BY version"#,
                             &[&T::NAME, &max_version, &aggregate_id.0],
                         )
-                        .await.expect("Failed to query events");
+                        .await;
+
+                        let rows = match rows {
+                            Ok(rows) => rows,
+                            Err(e) => {
+                                use crate::event_stores::StreamItemError;
+
+                                eprintln!("Error querying events: {}", e);
+                                if tx2.send(Err(StreamItemError::from(e))).is_err() {
+                                    eprintln!("Stream closed, cannot send error");
+                                }
+                                break;
+                            }
+                        };
 
                         for row in rows {
                             let aggregate_id: String = row.get(0);
@@ -428,7 +440,7 @@ impl PostgresEventStream {
                                 .or_insert(version);
 
                             // Send the commit to the channel
-                            if tx2.send(commit).is_err() {
+                            if tx2.send(Ok(commit)).is_err() {
                                 eprintln!("Stream closed, cannot send event");
                                 break;
                             }
@@ -451,10 +463,9 @@ impl PostgresEventStream {
 
 #[cfg(feature = "streaming")]
 impl StreamingEventStore for PostgresEventStream {
-    async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = Commit<X::Event>>> {
+    async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = StreamItem<X::Event>>> {
         let client = self.client;
         let rx2 = PostgresEventStream::listen::<X>(client, self.connection).await;
-        #[allow(clippy::expect_used)]
         Ok(EventStream::new(rx2, ()))
     }
 }
@@ -657,6 +668,8 @@ mod tests {
             let mut n = 0;
             let mut iter = events_to_receive.iter();
             while let Some(commit) = stream.next().await {
+                let commit = commit.expect("Stream returned an error");
+
                 let expected_event = iter.next().expect("Got more events than expected");
                 assert_eq!(
                     commit.id, "test5",
@@ -733,6 +746,8 @@ mod tests {
             let mut n = 0;
             let mut iter = events_to_receive.iter();
             while let Some(commit) = stream.next().await {
+                let commit = commit.expect("Stream returned an error");
+
                 let expected_event = iter.next().expect("Got more events than expected");
                 assert_eq!(
                     commit.id, "test5",

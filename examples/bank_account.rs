@@ -122,6 +122,11 @@ async fn main() -> espg::Result<()> {
     let mut n = 0;
     let mut stream = stream.take(8);
     while let Some(commit) = stream.next().await {
+        let Ok(commit) = commit else {
+            eprintln!("Error processing event stream");
+            break;
+        };
+
         n += 1;
         eprintln!("Received event number {}", n);
         let event = commit.inner;

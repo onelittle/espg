@@ -35,6 +35,9 @@ pub enum Error {
     #[cfg(feature = "postgres")]
     /// Only available when the `postgres` feature is enabled.
     SerdeJsonError(#[from] serde_json::Error),
+    #[cfg(feature = "streaming")]
+    #[error("streaming error: {0}")]
+    StreamingError(#[from] StreamItemError),
 }
 
 impl PartialEq for Error {
@@ -165,8 +168,19 @@ pub trait EventStore: Sync {
 }
 
 #[cfg(feature = "streaming")]
+#[derive(thiserror::Error, Debug)]
+pub enum StreamItemError {
+    #[cfg(feature = "postgres")]
+    #[error("Tokio Postgres error: {0}")]
+    TokioPgError(#[from] tokio_postgres::Error),
+}
+
+#[cfg(feature = "streaming")]
+pub type StreamItem<T> = std::result::Result<Commit<T>, StreamItemError>;
+
+#[cfg(feature = "streaming")]
 #[allow(async_fn_in_trait)]
 pub trait StreamingEventStore {
     #[cfg(feature = "streaming")]
-    async fn stream<T: Aggregate>(self) -> Result<impl Stream<Item = Commit<T::Event>>>;
+    async fn stream<T: Aggregate>(self) -> Result<impl Stream<Item = StreamItem<T::Event>>>;
 }

@@ -11,9 +11,9 @@ use indexmap::IndexMap;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::{Commit, Error, EventStore, Result};
-#[cfg(feature = "streaming")]
-use crate::StreamingEventStore;
 use crate::{Aggregate, Id, util::Txid};
+#[cfg(feature = "streaming")]
+use crate::{StreamingEventStore, event_stores::StreamItem};
 
 type CommitTuple = Vec<(Txid, Box<dyn Any + Send + Sync>)>;
 
@@ -193,11 +193,11 @@ impl EventStore for InMemoryEventStore {
 
 #[cfg(feature = "streaming")]
 impl StreamingEventStore for InMemoryEventStore {
-    async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = Commit<X::Event>>> {
+    async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = StreamItem<X::Event>>> {
         use tokio_stream::wrappers::{BroadcastStream, UnboundedReceiverStream};
         let rx = self.broadcast.subscribe();
         let mut stream = BroadcastStream::new(rx);
-        let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel::<Commit<X::Event>>();
+        let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel();
         let store = self.store.read().await;
         let stream2 = UnboundedReceiverStream::new(rx1);
 
@@ -216,7 +216,7 @@ impl StreamingEventStore for InMemoryEventStore {
                     diagnostics: None,
                     global_seq: Some(*txid), // Global sequence is not used in this context
                 };
-                if tx1.send(commit).is_err() {
+                if tx1.send(Ok(commit)).is_err() {
                     eprintln!("Stream closed, cannot send initial event");
                 }
             }
@@ -239,7 +239,7 @@ impl StreamingEventStore for InMemoryEventStore {
                                     diagnostics: commit.diagnostics,
                                     global_seq: commit.global_seq,
                                 };
-                                if tx1.send(commit).is_err() {
+                                if tx1.send(Ok(commit)).is_err() {
                                     eprintln!("Stream closed, cannot send event");
                                 }
                             }
@@ -370,6 +370,8 @@ mod tests {
             let mut n = 0;
             let mut iter = events_to_receive.iter();
             while let Some(commit) = stream.next().await {
+                let commit = commit.expect("Stream returned an error");
+
                 let expected_event = iter.next().expect("Got more events than expected");
                 assert_eq!(
                     commit.id, "test5",
@@ -447,6 +449,8 @@ mod tests {
             let mut n = 0;
             let mut iter = events_to_receive.iter();
             while let Some(commit) = stream.next().await {
+                let commit = commit.expect("Stream returned an error");
+
                 let expected_event = iter.next().expect("Got more events than expected");
                 assert_eq!(
                     commit.id, "test5",
