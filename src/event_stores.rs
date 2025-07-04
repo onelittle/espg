@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub use streaming::EventStream;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Aggregate is not found: {0}")]
     /// The aggregate with the specified ID was not found.
@@ -169,6 +170,7 @@ pub trait EventStore: Sync {
 
 #[cfg(feature = "streaming")]
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum StreamItemError {
     #[cfg(feature = "postgres")]
     #[error("Tokio Postgres error: {0}")]
