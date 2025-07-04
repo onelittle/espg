@@ -33,6 +33,7 @@ pub trait Subscriber<T: Aggregate + 'static> {
     fn handle_event(
         &self,
         store: &impl EventStore,
+        state: T,
         commit: Commit<T::Event>,
     ) -> impl std::future::Future<Output = crate::Result<()>> + std::marker::Send;
 
@@ -124,7 +125,14 @@ pub trait Subscriber<T: Aggregate + 'static> {
                         }
 
                         let store = PostgresEventStore::new(&tx);
-                        subscriber.handle_event(&store, commit).await?;
+                        let mut events = if commit.version > 1 {
+                            store.try_get_events_before::<T>(&T::id(commit.id.clone()), commit.version).await?.inner
+                        } else {
+                            vec![]
+                        };
+                        events.push(commit.inner.clone());
+                        let state = T::from_slice(&events);
+                        subscriber.handle_event(&store, state, commit).await?;
 
                         let commit_last_seq: String = commit_last_seq.to_string();
                         #[allow(clippy::expect_used)]
@@ -209,7 +217,14 @@ pub trait Subscriber<T: Aggregate + 'static> {
                             continue; // Skip already processed events
                         }
 
-                        subscriber.handle_event(&event_store, commit).await?;
+                        let mut events = if commit.version > 1 {
+                            event_store.try_get_events_before::<T>(&T::id(commit.id.clone()), commit.version).await?.inner
+                        } else {
+                            vec![]
+                        };
+                        events.push(commit.inner.clone());
+                        let state = T::from_slice(&events);
+                        subscriber.handle_event(&event_store, state, commit).await?;
 
                         // Update the offset for the subscription
                         *offset = commit_seq;
@@ -258,6 +273,7 @@ mod tests {
         async fn handle_event(
             &self,
             _store: &impl EventStore,
+            _state: State,
             _commit: Commit<Event>,
         ) -> Result<()> {
             let mut val = self.invocations.lock().await;
@@ -326,8 +342,13 @@ mod tests {
         }
 
         // Wait for all subscribers to have seen the events
+        let mut max_attempts = 10;
         while *tick.lock().await < 30 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            max_attempts -= 1;
+            if max_attempts == 0 {
+                panic!("Timeout waiting for subscribers to process events");
+            }
         }
 
         for subscription in subscriptions {
@@ -384,8 +405,13 @@ mod tests {
         }
 
         // Wait for all subscribers to have seen the events
+        let mut max_attempts = 10;
         while *tick.lock().await < 30 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            max_attempts -= 1;
+            if max_attempts == 0 {
+                panic!("Timeout waiting for subscribers to process events");
+            }
         }
 
         for subscription in subscriptions {

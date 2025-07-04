@@ -165,17 +165,22 @@ impl EventStore for InMemoryEventStore {
         start_version: usize,
         end_version: Option<usize>,
     ) -> Result<Commit<Vec<X::Event>>> {
-        let end_version = end_version.unwrap_or(usize::MAX);
+        if start_version == 0 {
+            panic!("start_version must be greater than 0")
+        }
+
         let store = self.store.read().await;
-        let stored_commit = store
+        let entry = store
             .get(&id.0.to_string())
             .ok_or(Error::NotFound("Aggregate not found".to_string()))?;
-
-        let inner: Vec<X::Event> = stored_commit
+        let count = end_version
+            .unwrap_or(entry.len())
+            .saturating_sub(start_version);
+        let inner: Vec<X::Event> = entry
             .iter()
             .enumerate()
-            .skip_while(|(v, _)| *v < start_version - 1)
-            .take_while(|(v, _)| *v < end_version)
+            .skip(start_version - 1)
+            .take(count + 1)
             .map(|(_, (_, event))| {
                 #[allow(clippy::expect_used)]
                 event
@@ -186,7 +191,7 @@ impl EventStore for InMemoryEventStore {
             .collect();
         Ok(Commit {
             id: id.to_string(),
-            version: stored_commit.len(),
+            version: entry.len(),
             diagnostics: None,
             inner,
             global_seq: None, // Global sequence is not used in this context
@@ -201,8 +206,8 @@ impl StreamingEventStore for InMemoryEventStore {
         let rx = self.broadcast.subscribe();
         let mut stream = BroadcastStream::new(rx);
         let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel();
-        let store = self.store.read().await;
         let stream2 = UnboundedReceiverStream::new(rx1);
+        let store = self.store.read().await;
 
         for (id, tuples) in store.iter() {
             for (version_index, (txid, event)) in tuples.iter().enumerate() {
@@ -225,11 +230,12 @@ impl StreamingEventStore for InMemoryEventStore {
             }
         }
 
+        drop(store);
+
         tokio::spawn(async move {
             use tokio_stream::StreamExt;
 
             while let Some(result) = stream.next().await {
-                eprintln!("Processing event from stream");
                 match result {
                     Ok(commit) => {
                         let result = serde_json::from_str::<X::Event>(&commit.inner);
@@ -271,7 +277,6 @@ impl StreamingEventStore for InMemoryEventStore {
                     }
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             eprintln!("Stream processing ended...");
         });
         Ok(stream2)
@@ -293,8 +298,21 @@ mod tests {
 
         let id = State::id("test1");
         event_store.append(&id, Event::Increment(10)).await?;
+        assert_eq!(event_store.len().await, 1);
+        let events = event_store
+            .try_get_events::<State>(&id)
+            .await
+            .expect("Failed to get events");
+        assert_eq!(events.inner.len(), 1);
         event_store.append(&id, Event::Decrement(4)).await?;
         assert_eq!(event_store.len().await, 2);
+        let events = event_store
+            .try_get_events::<State>(&id)
+            .await
+            .expect("Failed to get events");
+        assert_eq!(events.inner.len(), 2);
+        assert_eq!(events.inner[0], Event::Increment(10));
+        assert_eq!(events.inner[1], Event::Decrement(4));
         let aggregate = event_store
             .get_aggregate(&id)
             .await
