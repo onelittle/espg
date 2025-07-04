@@ -106,7 +106,6 @@ pub async fn destroy(
         .await?;
     Ok(())
 }
-impl<Db: GenericClient> PostgresEventStore<'_, Db> {}
 
 #[async_trait]
 impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
