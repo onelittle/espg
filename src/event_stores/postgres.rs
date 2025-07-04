@@ -106,19 +106,23 @@ pub async fn destroy(
         .await?;
     Ok(())
 }
+impl<Db: GenericClient> PostgresEventStore<'_, Db> {}
 
 #[async_trait]
 impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
-    async fn try_get_events_since<X: Aggregate>(
+    async fn try_get_events_between<X: Aggregate>(
         &self,
         id: &Id<X>,
-        version: usize,
+        min_version: usize,
+        max_version: Option<usize>,
     ) -> Result<super::Commit<Vec<X::Event>>> {
+        let min_version = min_version as i32;
+        let max_version = max_version.map(|v| v as i32).unwrap_or(i32::MAX);
         let rows = self
             .client
             .query(
-                "SELECT version, action, global_seq::text FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version > $3 ORDER BY version",
-                &[&id.0, &X::NAME, &(version as i32)],
+                "SELECT version, action, global_seq::text FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version BETWEEN $3 AND $4 ORDER BY version",
+                &[&id.0, &X::NAME, &min_version, &max_version],
             )
             .await?;
 
@@ -130,7 +134,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
                 let global_seq: Txid = global_seq.into();
                 (version as usize, Some(global_seq))
             })
-            .unwrap_or((version, None));
+            .unwrap_or(((min_version - 1) as usize, None));
 
         if version == 0 {
             return Err(Error::NotFound("No events found".to_string()));

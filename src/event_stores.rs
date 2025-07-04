@@ -99,11 +99,19 @@ pub trait EventStore: Sync {
         version: usize,
         event: X::Event,
     ) -> Result<()>;
+    async fn try_get_events_between<X: Aggregate>(
+        &self,
+        id: &Id<X>,
+        start_version: usize,
+        end_version: Option<usize>,
+    ) -> Result<Commit<Vec<X::Event>>>;
     async fn try_get_events_since<X: Aggregate>(
         &self,
         id: &Id<X>,
         version: usize,
-    ) -> Result<Commit<Vec<X::Event>>>;
+    ) -> Result<Commit<Vec<X::Event>>> {
+        self.try_get_events_between(id, version + 1, None).await
+    }
     async fn try_get_events<X: Aggregate>(&self, id: &Id<X>) -> Result<Commit<Vec<X::Event>>> {
         self.try_get_events_since(id, 0).await
     }

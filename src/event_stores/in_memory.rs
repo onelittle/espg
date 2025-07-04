@@ -159,11 +159,13 @@ impl EventStore for InMemoryEventStore {
         Ok(())
     }
 
-    async fn try_get_events_since<X: Aggregate>(
+    async fn try_get_events_between<X: Aggregate>(
         &self,
         id: &Id<X>,
-        version: usize,
+        start_version: usize,
+        end_version: Option<usize>,
     ) -> Result<Commit<Vec<X::Event>>> {
+        let end_version = end_version.unwrap_or(usize::MAX);
         let store = self.store.read().await;
         let stored_commit = store
             .get(&id.0.to_string())
@@ -172,7 +174,8 @@ impl EventStore for InMemoryEventStore {
         let inner: Vec<X::Event> = stored_commit
             .iter()
             .enumerate()
-            .skip_while(|(v, _)| *v < version)
+            .skip_while(|(v, _)| *v < start_version - 1)
+            .take_while(|(v, _)| *v < end_version)
             .map(|(_, (_, event))| {
                 #[allow(clippy::expect_used)]
                 event
