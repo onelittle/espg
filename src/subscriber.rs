@@ -1,6 +1,7 @@
-use crate::{Aggregate, Commit, EventStore, PostgresEventStore};
+#[cfg(feature = "inmem")]
+use crate::event_stores::InMemoryEventStore;
+use crate::{Aggregate, Commit, EventStore};
 use futures::StreamExt;
-use tokio_postgres::GenericClient;
 use tokio_util::sync::CancellationToken;
 
 pub struct Subscription {
@@ -28,8 +29,9 @@ pub trait Subscriber<T: Aggregate + 'static> {
         async {}
     }
 
+    #[cfg(feature = "postgres")]
     #[allow(async_fn_in_trait)]
-    async fn start(self, config: tokio_postgres::Config) -> crate::Result<Subscription>
+    async fn start_postgres(self, config: tokio_postgres::Config) -> crate::Result<Subscription>
     where
         Self: Sized + Send + 'static,
     {
@@ -47,8 +49,12 @@ pub trait Subscriber<T: Aggregate + 'static> {
         });
 
         // Make sure the row is present in the database so we can lock it
-        let event_store = PostgresEventStore::new(&client);
-        event_store.ensure_subscription(&self).await?;
+        client
+            .execute(
+                "INSERT INTO subscriptions (name, aggregate_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                &[&Self::NAME, &T::NAME],
+            )
+            .await?;
 
         tokio::spawn(async move {
             use tokio::select;
@@ -59,6 +65,8 @@ pub trait Subscriber<T: Aggregate + 'static> {
             let mut stream = streaming_event_store.stream::<T>().await?;
 
             loop {
+                use crate::util::Txid;
+
                 select! {
                     biased;
 
@@ -80,11 +88,14 @@ pub trait Subscriber<T: Aggregate + 'static> {
                             subscriber.tick().await;
 
                             let last_seq_string: String = row.get(0);
-                            let last_seq: i64 = last_seq_string.parse().expect("Failed to parse last_seq");
-                            let commit_last_seq: i64 = commit.global_seq.expect("Commit global_seq is None");
+                            let last_seq: Txid = last_seq_string.into();
+                            let Some(commit_last_seq) = commit.global_seq else {
+                                eprintln!("Commit without global sequence, skipping");
+                                continue; // Skip commits without a global sequence
+                            };
 
                             if commit_last_seq <= last_seq {
-                                tx.rollback().await.expect("Failed to rollback transaction");
+                                let _ = tx.rollback().await;
                                 continue;
                             }
 
@@ -92,7 +103,9 @@ pub trait Subscriber<T: Aggregate + 'static> {
                             subscriber.handle_event(&store, commit).await;
 
                             let commit_last_seq: String = commit_last_seq.to_string();
+                            #[allow(clippy::expect_used)]
                             tx.execute("UPDATE subscriptions SET last_seq = $1::text WHERE name = $2 AND aggregate_type = $3", &[&commit_last_seq, &Self::NAME, &T::NAME]).await.expect("Failed to update subscription last_seq");
+                            #[allow(clippy::expect_used)]
                             tx.commit().await.expect("Failed to commit transaction");
                         } else {
                             break;
@@ -108,32 +121,84 @@ pub trait Subscriber<T: Aggregate + 'static> {
             cancellation_token: parent_token,
         })
     }
-}
 
-trait SubscriberExt {
-    async fn ensure_subscription<T: Aggregate + 'static, S: Subscriber<T>>(
-        &self,
-        subscriber: &S,
-    ) -> crate::Result<()>;
-}
+    #[cfg(feature = "inmem")]
+    #[allow(async_fn_in_trait)]
+    async fn start_inmem(self, event_store: InMemoryEventStore) -> crate::Result<Subscription>
+    where
+        Self: Sized + Send + 'static,
+    {
+        use crate::StreamingEventStore;
 
-impl<'a, Db: GenericClient> SubscriberExt for PostgresEventStore<'a, Db> {
-    async fn ensure_subscription<T: Aggregate + 'static, S: Subscriber<T>>(
-        &self,
-        _: &S,
-    ) -> crate::Result<()> {
-        self.client
-            .execute(
-                "INSERT INTO subscriptions (name, aggregate_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                &[&S::NAME, &T::NAME],
-            )
-            .await?;
-        Ok(())
+        let parent_token = CancellationToken::new();
+        let child_token = parent_token.child_token();
+
+        let key = (Self::NAME.to_string(), T::NAME.to_string());
+
+        {
+            let mut subscriptions = event_store.subscriptions.write().await;
+            if !subscriptions.contains_key(&key) {
+                use crate::util::Txid;
+
+                subscriptions.insert(key.clone(), Txid(0));
+            }
+        }
+
+        let mut stream = event_store.clone().stream::<T>().await?;
+
+        tokio::spawn(async move {
+            use tokio::select;
+
+            let subscriber = self;
+
+            loop {
+                select! {
+                    biased;
+
+                    _ = child_token.cancelled() => {
+                        break;
+                    }
+                    commit = stream.next() => {
+                        let Some(commit) = commit else {
+                            break;
+                        };
+                        let Some(commit_seq) = commit.global_seq else {
+                            eprintln!("Commit without global sequence, skipping");
+                            continue; // Skip commits without a global sequence
+                        };
+
+                        #[cfg(test)]
+                        subscriber.tick().await;
+
+                        let mut subscriptions = event_store.subscriptions.write().await;
+                        #[allow(clippy::expect_used)]
+                        let offset = subscriptions.get_mut(&key).expect("Subscription not found");
+
+                        eprintln!("Commit seq: {commit_seq}, offset: {offset}");
+                        if commit_seq <= *offset {
+                            continue; // Skip already processed events
+                        }
+
+                        subscriber.handle_event(&event_store, commit).await;
+
+                        // Update the offset for the subscription
+                        *offset = commit_seq;
+                    }
+                }
+            }
+
+            Ok::<(), crate::Error>(())
+        });
+
+        Ok(Subscription {
+            cancellation_token: parent_token,
+        })
     }
 }
 
 #[cfg(test)]
 #[cfg(feature = "postgres")]
+#[cfg(feature = "inmem")]
 #[allow(clippy::expect_used)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -143,7 +208,7 @@ mod tests {
     use super::*;
     use crate::event_stores::postgres;
     use crate::tests::{Event, State};
-    use crate::{EventStore, PostgresEventStore, Result};
+    use crate::{EventStore, InMemoryEventStore, PostgresEventStore, Result};
 
     #[derive(Default)]
     pub struct TestSubscriber {
@@ -166,10 +231,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "postgres")]
     async fn test_subscriber() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let client = test_db.connect_and_discard_conn().await;
-        let config = test_db.tokio_postgres_config();
+        let client = test_db.client().await;
+        let config = test_db.tokio_postgres_config().await;
 
         postgres::initialize(&client).await?;
         postgres::clear(&client).await?;
@@ -177,7 +243,7 @@ mod tests {
         // let event_store = PostgresEventStore::new(&client);
         // let subscriber = TestSubscriber::default();
         let subscriber = TestSubscriber::default();
-        subscriber.start(config).await.unwrap();
+        subscriber.start_postgres(config).await.unwrap();
 
         // It should save a subscription in the database
         let row = client
@@ -196,10 +262,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "postgres")]
     async fn test_subscriber_concurrency() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let client = test_db.connect_and_discard_conn().await;
-        let config = test_db.tokio_postgres_config();
+        let client = test_db.client().await;
+        let config = test_db.tokio_postgres_config().await;
 
         postgres::initialize(&client).await?;
         postgres::clear(&client).await?;
@@ -214,7 +281,68 @@ mod tests {
             let config = config.clone();
             let handle = tokio::task::spawn(async move {
                 let subscriber = TestSubscriber { invocations, tick };
-                subscriber.start(config).await.unwrap()
+                subscriber.start_postgres(config).await.unwrap()
+            });
+            handles.push(handle);
+        }
+
+        let id = State::id("test_state");
+        for _ in 0..10 {
+            event_store.append(&id, Event::Increment(10)).await?;
+        }
+
+        // Wait for all subscribers to have seen the events
+        while *tick.lock().await < 30 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        for handle in handles {
+            let subscription = handle.await.unwrap();
+            subscription.cancel();
+        }
+
+        assert_eq!(*tick.lock().await, 30);
+        assert_eq!(*invocations.lock().await, 10);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "inmem")]
+    async fn test_inmem_subscriber() -> Result<()> {
+        use crate::util::Txid;
+
+        let event_store = InMemoryEventStore::default();
+
+        // let event_store = PostgresEventStore::new(&client);
+        // let subscriber = TestSubscriber::default();
+        let subscriber = TestSubscriber::default();
+        subscriber.start_inmem(event_store.clone()).await.unwrap();
+
+        // It should save a subscription in the database
+        let subs = event_store.subscriptions.read().await;
+        let row = subs.get(&(TestSubscriber::NAME.to_string(), State::NAME.to_string()));
+        assert!(row.is_some());
+        let offset = row.unwrap();
+        assert_eq!(*offset, Txid(0));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "inmem")]
+    async fn test_inmem_subscriber_concurrency() -> Result<()> {
+        let event_store = InMemoryEventStore::default();
+        let invocations = Arc::new(Mutex::new(0));
+        let tick = Arc::new(Mutex::new(0));
+        let mut handles = vec![];
+        for _ in 0..3 {
+            let invocations = invocations.clone();
+            let tick = tick.clone();
+            let event_store = event_store.clone();
+            let handle = tokio::task::spawn(async move {
+                let subscriber = TestSubscriber { invocations, tick };
+                subscriber.start_inmem(event_store).await.unwrap()
             });
             handles.push(handle);
         }

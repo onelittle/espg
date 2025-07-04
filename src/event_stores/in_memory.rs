@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicI64;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::{any::Any, sync::Arc};
@@ -12,14 +13,16 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use super::{Commit, Error, EventStore, Result};
 #[cfg(feature = "streaming")]
 use crate::StreamingEventStore;
-use crate::{Aggregate, Id};
+use crate::{Aggregate, Id, util::Txid};
 
-type CommitTuple = (usize, Vec<Box<dyn Any + Send + Sync>>);
+type CommitTuple = Vec<(Txid, Box<dyn Any + Send + Sync>)>;
 
 type RwLock<T> = tokio::sync::RwLock<T>;
 
 pub struct InMemoryEventStore {
     pub(crate) store: Arc<RwLock<IndexMap<String, CommitTuple>>>,
+    pub(crate) subscriptions: Arc<RwLock<IndexMap<(String, String), Txid>>>,
+    txid: Arc<AtomicI64>,
     broadcast: tokio::sync::broadcast::Sender<Commit<String>>,
     _rx: Option<tokio::sync::broadcast::Receiver<Commit<String>>>,
     #[cfg(test)]
@@ -30,7 +33,7 @@ impl InMemoryEventStore {
     pub async fn len(&self) -> usize {
         let store = self.store.read().await;
         let mut events = 0;
-        for (_, (_, event_list)) in store.iter() {
+        for (_, event_list) in store.iter() {
             events += event_list.len();
         }
         events
@@ -47,6 +50,8 @@ impl Clone for InMemoryEventStore {
         let tx = self.broadcast.clone();
         InMemoryEventStore {
             store: self.store.clone(),
+            subscriptions: self.subscriptions.clone(),
+            txid: self.txid.clone(),
             broadcast: tx,
             _rx: None,
             #[cfg(test)]
@@ -60,6 +65,8 @@ impl Default for InMemoryEventStore {
         let (tx, _rx) = tokio::sync::broadcast::channel::<Commit<String>>(100);
         InMemoryEventStore {
             store: Arc::new(RwLock::new(IndexMap::new())),
+            subscriptions: Arc::new(RwLock::new(IndexMap::new())),
+            txid: Arc::new(AtomicI64::new(1)),
             broadcast: tx,
             _rx: Some(_rx),
             #[cfg(test)]
@@ -94,19 +101,23 @@ impl InMemoryEventStore {
 #[async_trait]
 impl EventStore for InMemoryEventStore {
     async fn append<X: Aggregate>(&self, id: &Id<X>, action: X::Event) -> Result<()> {
-        let version = {
+        let (global_seq, version) = {
             let mut store = self.store.write().await;
             let previous_commit = store.entry(id.to_string()).or_default();
-            previous_commit.0 += 1;
-            previous_commit.1.push(Box::new(action.clone()));
-            previous_commit.0
+            let global_seq = self
+                .txid
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .into();
+            eprintln!("Global sequence: {}", global_seq);
+            previous_commit.push((global_seq, Box::new(action.clone())));
+            (Some(global_seq), previous_commit.len())
         };
         let _commit = Commit {
             id: id.to_string(),
             version, // Version is not used in this context
             inner: action,
             diagnostics: None,
-            global_seq: None, // Global sequence is not used in this context
+            global_seq,
         };
         #[cfg(feature = "streaming")]
         self.transmit::<X>(_commit).await?;
@@ -119,25 +130,29 @@ impl EventStore for InMemoryEventStore {
         version: usize,
         action: X::Event,
     ) -> Result<()> {
-        let version = {
+        let (global_seq, version) = {
             let mut store = self.store.write().await;
             let previous_commit = store.entry(id.to_string()).or_default();
-            if previous_commit.0 >= version {
+            if previous_commit.len() != version - 1 {
                 #[cfg(test)]
                 self.version_conflicts
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 return Err(Error::VersionConflict(version));
             }
-            previous_commit.0 += 1;
-            previous_commit.1.push(Box::new(action.clone()));
-            previous_commit.0
+            let global_seq = self
+                .txid
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                .into();
+            previous_commit.push((global_seq, Box::new(action.clone())));
+            eprintln!("Global sequence: {}", global_seq);
+            (Some(global_seq), previous_commit.len())
         };
         let _commit = Commit {
             id: id.to_string(),
             version,
             inner: action,
             diagnostics: None,
-            global_seq: None, // Global sequence is not used in this context
+            global_seq,
         };
         #[cfg(feature = "streaming")]
         self.transmit::<X>(_commit).await?;
@@ -155,11 +170,10 @@ impl EventStore for InMemoryEventStore {
             .ok_or(Error::NotFound("Aggregate not found".to_string()))?;
 
         let inner: Vec<X::Event> = stored_commit
-            .1
             .iter()
             .enumerate()
             .skip_while(|(v, _)| *v < version)
-            .map(|(_, event)| {
+            .map(|(_, (_, event))| {
                 #[allow(clippy::expect_used)]
                 event
                     .downcast_ref::<X::Event>()
@@ -169,7 +183,7 @@ impl EventStore for InMemoryEventStore {
             .collect();
         Ok(Commit {
             id: id.to_string(),
-            version: stored_commit.0,
+            version: stored_commit.len(),
             diagnostics: None,
             inner,
             global_seq: None, // Global sequence is not used in this context
@@ -186,10 +200,9 @@ impl StreamingEventStore for InMemoryEventStore {
         let (tx1, rx1) = tokio::sync::mpsc::unbounded_channel::<Commit<X::Event>>();
         let store = self.store.read().await;
         let stream2 = UnboundedReceiverStream::new(rx1);
-        let mut global_seq = 0;
 
-        for (id, (_, events)) in store.iter() {
-            for (version_index, event) in events.iter().enumerate() {
+        for (id, tuples) in store.iter() {
+            for (version_index, (txid, event)) in tuples.iter().enumerate() {
                 #[allow(clippy::expect_used)]
                 let event = event
                     .downcast_ref::<X::Event>()
@@ -201,9 +214,8 @@ impl StreamingEventStore for InMemoryEventStore {
                     version,
                     inner: event,
                     diagnostics: None,
-                    global_seq: Some(global_seq), // Global sequence is not used in this context
+                    global_seq: Some(*txid), // Global sequence is not used in this context
                 };
-                global_seq += 1;
                 if tx1.send(commit).is_err() {
                     eprintln!("Stream closed, cannot send initial event");
                 }
@@ -225,9 +237,8 @@ impl StreamingEventStore for InMemoryEventStore {
                                     version: commit.version,
                                     inner: event,
                                     diagnostics: commit.diagnostics,
-                                    global_seq: Some(global_seq),
+                                    global_seq: commit.global_seq,
                                 };
-                                global_seq += 1;
                                 if tx1.send(commit).is_err() {
                                     eprintln!("Stream closed, cannot send event");
                                 }
@@ -280,6 +291,7 @@ mod tests {
         let id = State::id("test1");
         event_store.append(&id, Event::Increment(10)).await?;
         event_store.append(&id, Event::Decrement(4)).await?;
+        assert_eq!(event_store.len().await, 2);
         let aggregate = event_store
             .get_aggregate(&id)
             .await

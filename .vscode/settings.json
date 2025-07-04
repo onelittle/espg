@@ -3,6 +3,7 @@
     "postgres",
     "streaming",
     "inmem",
-    "rocket"
+    "rocket",
+    "async-graphql",
   ]
 }

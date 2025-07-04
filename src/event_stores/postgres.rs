@@ -2,6 +2,7 @@ use super::{Error, Result};
 use crate::{
     Aggregate, EventStore, Id,
     event_stores::{Commit, Diagnostics},
+    util::Txid,
 };
 #[cfg(feature = "streaming")]
 use crate::{EventStream, StreamingEventStore};
@@ -13,16 +14,16 @@ use futures_channel::mpsc;
 use serde_json::Value;
 use tokio_postgres::{GenericClient, types::Json};
 
-pub struct PostgresEventStore<'a, Db: GenericClient> {
+pub struct PostgresEventStore<'a, Db> {
     pub(crate) client: &'a Db,
     snapshot_interval: usize,
 }
 
-impl<'a, Db> PostgresEventStore<'a, Db>
+impl<Db> PostgresEventStore<'_, Db>
 where
     Db: GenericClient,
 {
-    pub fn new(client: &'a Db) -> PostgresEventStore<'a, Db> {
+    pub fn new<'a>(client: &'a Db) -> PostgresEventStore<'a, Db> {
         PostgresEventStore {
             client,
             snapshot_interval: 10,
@@ -126,8 +127,8 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
             .map(|row| {
                 let version: i32 = row.get(0);
                 let global_seq: String = row.get(2);
-                let global_seq: u64 = global_seq.parse().expect("Failed to parse global_seq");
-                (version as usize, Some(global_seq as i64))
+                let global_seq: Txid = global_seq.into();
+                (version as usize, Some(global_seq))
             })
             .unwrap_or((version, None));
 
@@ -350,7 +351,7 @@ impl PostgresEventStream {
                 let version: i32 = row.get(1);
                 let action: Json<T::Event> = row.get(2);
                 let global_seq: String = row.get(3);
-                let global_seq: i64 = global_seq.parse().expect("Failed to parse global_seq");
+                let global_seq = global_seq.into();
 
                 // Create a Commit from the row data
                 let commit = Commit {
@@ -409,8 +410,7 @@ impl PostgresEventStream {
                             let version: i32 = row.get(1);
                             let action: Json<T::Event> = row.get(2);
                             let global_seq: String = row.get(3);
-                            let global_seq: i64 =
-                                global_seq.parse().expect("Failed to parse global_seq");
+                            let global_seq = global_seq.into();
 
                             // Create a Commit from the row data
                             let commit = Commit {
@@ -463,87 +463,13 @@ impl StreamingEventStore for PostgresEventStream {
 #[allow(clippy::expect_used)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use tokio_postgres::Socket;
     #[cfg(feature = "streaming")]
     use tokio_stream::StreamExt;
 
     use super::*;
     use crate::tests::{Event, State};
 
-    async fn get_connection_string(
-        db_name: Option<&str>,
-    ) -> std::result::Result<String, tokio_postgres::Error> {
-        let thread_id = format!("{:?}", std::thread::current().id())
-            .replace("ThreadId(", "")
-            .replace(")", "");
-        let db_name = db_name
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| format!("espg_test_{}", thread_id));
-
-        eprintln!("Using database name: {}", db_name);
-
-        let connection_string = "postgres://theodorton@localhost:5432/postgres";
-        let (client, connection) =
-            tokio_postgres::connect(connection_string, tokio_postgres::NoTls).await?;
-
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("Connection error: {}", e);
-            }
-        });
-
-        let query = client
-            .batch_execute(format!("CREATE DATABASE {};", db_name).as_str())
-            .await;
-
-        match query {
-            Ok(_) => {}
-            Err(e) => {
-                if e.as_db_error().is_some_and(|db_error| {
-                    db_error.code() == &tokio_postgres::error::SqlState::DUPLICATE_DATABASE
-                }) {
-                    eprintln!("Database {} already exists, using it.", db_name);
-                } else {
-                    return Err(e);
-                }
-            }
-        }
-
-        eprintln!("Using database: {}", db_name);
-        let connection_string = format!("postgres://theodorton@localhost:5432/{}", db_name);
-
-        Ok(connection_string)
-    }
-
-    async fn init_conn(
-        db_name: Option<&str>,
-        spawn_conn: bool,
-    ) -> std::result::Result<
-        (
-            tokio_postgres::Client,
-            Option<tokio_postgres::Connection<Socket, tokio_postgres::tls::NoTlsStream>>,
-        ),
-        tokio_postgres::Error,
-    > {
-        let connection_string = get_connection_string(db_name).await?;
-        let (client, connection) =
-            tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
-                .await
-                .expect("Failed to connect to Postgres");
-        let connection = if spawn_conn {
-            tokio::spawn(async move {
-                if let Err(e) = connection.await {
-                    eprintln!("Connection error: {}", e);
-                }
-            });
-            None
-        } else {
-            Some(connection)
-        };
-        Ok((client, connection))
-    }
-
-    async fn init_event_store<'a, 'b>(
+    async fn event_store<'a, 'b>(
         client: &'a tokio_postgres::Client,
     ) -> std::result::Result<PostgresEventStore<'b, tokio_postgres::Client>, tokio_postgres::Error>
     where
@@ -561,25 +487,10 @@ mod tests {
         Ok(event_store)
     }
 
-    #[cfg(feature = "streaming")]
-    async fn init_event_stream(
-        db_name: Option<&str>,
-    ) -> std::result::Result<impl Stream<Item = Commit<Event>> + use<>, tokio_postgres::Error> {
-        let conn_string = get_connection_string(db_name).await?;
-        let config: tokio_postgres::Config = conn_string
-            .parse()
-            .expect("Failed to parse Postgres config");
-        let es = PostgresEventStream::new(config).await?;
-        Ok(es
-            .stream::<State>()
-            .await
-            .expect("Failed to create event stream"))
-    }
-
     #[tokio::test]
     async fn test_postgres_event_store() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let (mut client, _connection) = init_conn(Some(&test_db.name), true).await?;
+        let mut client = test_db.client().await;
         super::initialize(&client).await?;
         super::clear(&client).await?;
 
@@ -607,8 +518,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_missing_aggregate() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let (client, _connection) = init_conn(Some(&test_db.name), true).await?;
-        let event_store = init_event_store(&client)
+        let client = test_db.client().await;
+        let event_store = event_store(&client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -627,8 +538,8 @@ mod tests {
     #[tokio::test]
     async fn test_commit_conflict() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let (client, _connection) = init_conn(Some(&test_db.name), true).await?;
-        let event_store = init_event_store(&client)
+        let client = test_db.client().await;
+        let event_store = event_store(&client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -648,10 +559,10 @@ mod tests {
     #[tokio::test]
     async fn test_rollback() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let (mut client, _connection) = init_conn(Some(&test_db.name), true).await?;
+        let mut client = test_db.client().await;
 
         let id = State::id("test3");
-        let event_store = init_event_store(&client).await.unwrap();
+        let event_store = event_store(&client).await.unwrap();
         event_store.commit(&id, 1, Event::Increment(10)).await?;
 
         let commit = event_store.try_get_commit(&id).await?;
@@ -674,9 +585,9 @@ mod tests {
     #[tokio::test]
     async fn test_snapshot() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let (client, _connection) = init_conn(Some(&test_db.name), true).await?;
+        let client = test_db.client().await;
 
-        let event_store = init_event_store(&client)
+        let event_store = event_store(&client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -716,16 +627,17 @@ mod tests {
     #[cfg(feature = "streaming")]
     async fn test_streaming() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let (client, _connection) = init_conn(Some(&test_db.name), true).await?;
+        let client = test_db.client().await;
+        super::initialize(&client).await?;
+        super::clear(&client).await?;
 
-        let event_store = init_event_store(&client)
-            .await
-            .expect("msg: Failed to create event store");
+        let event_store = PostgresEventStore::new(&client);
         // Implement Stream as a custom struct with `next().await` method
         // Drop the client when the last event is received
-        let stream = init_event_stream(Some(&test_db.name))
-            .await
-            .expect("msg: Failed to create event stream");
+        let stream = PostgresEventStream::new(test_db.tokio_postgres_config().await)
+            .await?
+            .stream::<State>()
+            .await?;
 
         let events_to_send = vec![
             Event::Increment(10),
@@ -793,11 +705,11 @@ mod tests {
     #[cfg(feature = "streaming")]
     async fn test_streaming_after_writes() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let (client, _connection) = init_conn(Some(&test_db.name), true).await?;
+        let client = test_db.client().await;
+        super::initialize(&client).await?;
+        super::clear(&client).await?;
 
-        let event_store = init_event_store(&client)
-            .await
-            .expect("msg: Failed to create event store");
+        let event_store = PostgresEventStore::new(&client);
 
         let events_to_send = vec![
             Event::Increment(10),
@@ -812,9 +724,10 @@ mod tests {
             event_store.append(&id, event).await?;
         }
 
-        let stream = init_event_stream(Some(&test_db.name))
-            .await
-            .expect("msg: Failed to create event stream");
+        let stream = PostgresEventStream::new(test_db.tokio_postgres_config().await)
+            .await?
+            .stream::<State>()
+            .await?;
         let handle = tokio::spawn(async move {
             let mut stream = stream.take(4);
             let mut n = 0;
@@ -869,19 +782,16 @@ mod tests {
         use deadpool_postgres::{Config, ManagerConfig, RecyclingMethod, Runtime};
         use tokio_postgres::NoTls;
 
+        let test_db = crate::test_helper::get_test_database().await;
         let mut cfg = Config::new();
-        cfg.url = Some(
-            get_connection_string(None)
-                .await
-                .expect("Failed to get connection string"),
-        );
+        cfg.url = Some(test_db.connection_string());
         cfg.manager = Some(ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         });
         let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
 
         let client = pool.get().await.expect("Failed to get client from pool");
-        let event_store = init_event_store(&client).await?;
+        let event_store = event_store(&client).await?;
 
         let id = State::id("test6");
         event_store.append(&id, Event::Increment(10)).await?;
@@ -897,8 +807,8 @@ mod tests {
     #[tokio::test]
     async fn test_not_found() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let (client, _connection) = init_conn(Some(&test_db.name), true).await?;
-        let event_store = init_event_store(&client)
+        let client = test_db.client().await;
+        let event_store = event_store(&client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -918,8 +828,8 @@ mod tests {
     #[tokio::test]
     async fn test_commands() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let (client, _connection) = init_conn(Some(&test_db.name), true).await?;
-        let event_store = init_event_store(&client)
+        let client = test_db.client().await;
+        let event_store = event_store(&client)
             .await
             .expect("msg: Failed to create event store");
 

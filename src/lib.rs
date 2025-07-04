@@ -3,8 +3,9 @@ pub mod event_stores;
 #[cfg(feature = "streaming")]
 #[cfg(feature = "postgres")]
 mod subscriber;
+mod util;
 
-pub use aggregate::{Aggregate, Id};
+pub use aggregate::{Aggregate, Id, id};
 #[cfg(feature = "inmem")]
 pub use event_stores::InMemoryEventStore;
 #[cfg(feature = "postgres")]
@@ -128,44 +129,72 @@ mod tests {
 #[allow(clippy::unwrap_used)]
 #[cfg(feature = "postgres")]
 mod test_helper {
-    use std::ops::Deref;
-
+    use std::sync::atomic::AtomicBool;
     use tokio::io::AsyncReadExt;
 
     pub(crate) struct TestDb {
         pub(crate) name: String,
         _stream: tokio::net::UnixStream,
+        initialized: AtomicBool,
     }
 
     impl TestDb {
-        pub fn tokio_postgres_config(&self) -> tokio_postgres::Config {
+        pub fn connection_string(&self) -> String {
+            format!("postgres://localhost:5432/{}", self.name)
+        }
+
+        pub async fn tokio_postgres_config(&self) -> tokio_postgres::Config {
             let mut config = tokio_postgres::Config::new();
             config.host("localhost").port(5432).dbname(&self.name);
+            self.initialize(&config)
+                .await
+                .expect("Failed to initialize test database");
             config
         }
 
-        pub async fn connect(
+        async fn connect(
             &self,
         ) -> (
             tokio_postgres::Client,
             tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
         ) {
-            let config = self.tokio_postgres_config();
+            let config = self.tokio_postgres_config().await;
             config
                 .connect(tokio_postgres::NoTls)
                 .await
                 .expect("Failed to connect to test database")
         }
 
-        pub async fn connect_and_discard_conn(&self) -> tokio_postgres::Client {
+        pub async fn client(&self) -> tokio_postgres::Client {
             let (client, connection) = self.connect().await;
-            // Discard the connection to avoid blocking the test
             tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     eprintln!("Connection error: {}", e);
                 }
             });
+
             client
+        }
+
+        pub async fn initialize(&self, config: &tokio_postgres::Config) -> crate::Result<()> {
+            if self.initialized.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(());
+            }
+
+            let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
+
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Connection error: {}", e);
+                }
+            });
+
+            crate::event_stores::postgres::initialize(&client).await?;
+            crate::event_stores::postgres::clear(&client).await?;
+            self.initialized
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+
+            Ok(())
         }
     }
 
@@ -193,6 +222,7 @@ mod test_helper {
             return TestDb {
                 name: db_name.clone(),
                 _stream: stream,
+                initialized: AtomicBool::new(false),
             };
         }
 
