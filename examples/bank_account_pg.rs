@@ -111,7 +111,7 @@ async fn init_event_stream() -> impl Stream<Item = StreamItem<Event>> {
 #[tokio::main]
 async fn main() -> espg::Result<()> {
     let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
-    let (client, connection) = tokio_postgres::connect(&connection_string, NoTls).await?;
+    let (mut client, connection) = tokio_postgres::connect(&connection_string, NoTls).await?;
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -126,7 +126,7 @@ async fn main() -> espg::Result<()> {
 
     let stream = init_event_stream().await;
 
-    let event_store = PostgresEventStore::new(&client);
+    let event_store = PostgresEventStore::new(&mut client);
     let id = open_account(&event_store).await?;
     deposit_money(&event_store, &id, 100).await?;
     withdraw_money(&event_store, &id, 50).await?;
@@ -137,7 +137,7 @@ async fn main() -> espg::Result<()> {
     let thread_b = {
         let id = id.clone();
         tokio::spawn(async move {
-            let event_store = PostgresEventStore::new(&client);
+            let event_store = PostgresEventStore::new(&mut client);
             deposit_money(&event_store, &id, 100).await?;
             withdraw_money(&event_store, &id, 50).await?;
 

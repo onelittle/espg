@@ -88,7 +88,7 @@ impl<'a> Commands<'a> {
 async fn main() -> espg::Result<()> {
     let instant = std::time::Instant::now();
     let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
-    let (client, connection) = tokio_postgres::connect(&connection_string, NoTls).await?;
+    let (mut client, connection) = tokio_postgres::connect(&connection_string, NoTls).await?;
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -101,14 +101,14 @@ async fn main() -> espg::Result<()> {
 
     println!("Starting benchmark...");
     // Initialize the event store
-    let event_store = espg::PostgresEventStore::new(&client);
+    let event_store = espg::PostgresEventStore::new(&mut client);
 
     // Spawn 8 threads and perform 100000 operations in each
     let mut handles = vec![];
     for i in 0..8 {
         let handle = tokio::spawn(async move {
             let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
-            let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
+            let (mut client, connection) = tokio_postgres::connect(&connection_string, NoTls)
                 .await
                 .unwrap();
 
@@ -118,7 +118,7 @@ async fn main() -> espg::Result<()> {
                 }
             });
 
-            let event_store_clone = PostgresEventStore::new(&client);
+            let event_store_clone = PostgresEventStore::new(&mut client);
 
             {
                 let mut commands = Commands::new(&event_store_clone);
@@ -153,7 +153,7 @@ async fn main() -> espg::Result<()> {
     for i in 0..8 {
         let handle = tokio::spawn(async move {
             let connection_string = "postgres://theodorton@localhost/espg_examples".to_string();
-            let (client, connection) = tokio_postgres::connect(&connection_string, NoTls)
+            let (mut client, connection) = tokio_postgres::connect(&connection_string, NoTls)
                 .await
                 .unwrap();
 
@@ -163,7 +163,7 @@ async fn main() -> espg::Result<()> {
                 }
             });
 
-            let event_store_clone = PostgresEventStore::new(&client);
+            let event_store_clone = PostgresEventStore::new(&mut client);
             let id = AccountState::id(format!("account{}", i + 100_000));
             let state = event_store_clone
                 .get_commit(&id)

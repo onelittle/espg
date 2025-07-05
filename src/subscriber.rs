@@ -100,7 +100,7 @@ pub trait Subscriber<T: Aggregate + 'static> {
                             }
                         };
 
-                        let tx = client.transaction().await?;
+                        let mut tx = client.transaction().await?;
                         let row = tx.query_one(r#"
                             SELECT last_seq::text AS last_seq
                             FROM subscriptions
@@ -124,7 +124,7 @@ pub trait Subscriber<T: Aggregate + 'static> {
                             continue;
                         }
 
-                        let store = PostgresEventStore::new(&tx);
+                        let store = PostgresEventStore::new(&mut tx);
                         let mut events = if commit.version > 1 {
                             store.try_get_events_before::<T>(&T::id(commit.id.clone()), commit.version).await?.inner
                         } else {
@@ -316,13 +316,13 @@ mod tests {
     #[cfg(feature = "postgres")]
     async fn test_subscriber_concurrency() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let client = test_db.client().await;
+        let mut client = test_db.client().await;
         let config = test_db.tokio_postgres_config().await;
 
         PostgresEventStore::initialize(&client).await?;
         PostgresEventStore::clear(&client).await?;
 
-        let event_store = PostgresEventStore::new(&client);
+        let event_store = PostgresEventStore::new(&mut client);
         let invocations = Arc::new(Mutex::new(0));
         let tick = Arc::new(Mutex::new(0));
         let mut subscriptions = vec![];

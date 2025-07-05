@@ -15,7 +15,7 @@ use serde_json::Value;
 use tokio_postgres::{GenericClient, types::Json};
 
 pub struct PostgresEventStore<'a, Db> {
-    pub(crate) client: &'a Db,
+    pub(crate) client: &'a mut Db,
     snapshot_interval: usize,
 }
 
@@ -23,7 +23,7 @@ impl<Db> PostgresEventStore<'_, Db>
 where
     Db: GenericClient,
 {
-    pub fn new<'a>(client: &'a Db) -> PostgresEventStore<'a, Db> {
+    pub fn new<'a>(client: &'a mut Db) -> PostgresEventStore<'a, Db> {
         PostgresEventStore {
             client,
             snapshot_interval: 10,
@@ -486,12 +486,11 @@ mod tests {
     use crate::tests::{Event, State};
 
     async fn event_store<'a, 'b>(
-        client: &'a tokio_postgres::Client,
+        client: &'a mut tokio_postgres::Client,
     ) -> std::result::Result<PostgresEventStore<'b, tokio_postgres::Client>, tokio_postgres::Error>
     where
         'a: 'b,
     {
-        let event_store = PostgresEventStore::new(client);
         PostgresEventStore::initialize(client)
             .await
             .expect("Failed to initialize event store");
@@ -499,6 +498,7 @@ mod tests {
         PostgresEventStore::clear(client)
             .await
             .expect("Failed to clear event store");
+        let event_store = PostgresEventStore::new(client);
 
         Ok(event_store)
     }
@@ -510,8 +510,8 @@ mod tests {
         PostgresEventStore::initialize(&client).await?;
         PostgresEventStore::clear(&client).await?;
 
-        let db_transaction = client.transaction().await?;
-        let transaction = PostgresEventStore::new(&db_transaction);
+        let mut db_transaction = client.transaction().await?;
+        let transaction = PostgresEventStore::new(&mut db_transaction);
 
         let id = State::id("test1");
         transaction.append(&id, Event::Increment(10)).await?;
@@ -534,8 +534,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_missing_aggregate() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let client = test_db.client().await;
-        let event_store = event_store(&client)
+        let mut client = test_db.client().await;
+        let event_store = event_store(&mut client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -554,8 +554,8 @@ mod tests {
     #[tokio::test]
     async fn test_commit_conflict() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let client = test_db.client().await;
-        let event_store = event_store(&client)
+        let mut client = test_db.client().await;
+        let event_store = event_store(&mut client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -578,19 +578,19 @@ mod tests {
         let mut client = test_db.client().await;
 
         let id = State::id("test3");
-        let event_store = event_store(&client).await.unwrap();
+        let event_store = event_store(&mut client).await.unwrap();
         event_store.commit(&id, 1, Event::Increment(10)).await?;
 
         let commit = event_store.try_get_commit(&id).await?;
         assert_eq!(commit.version, 1);
         assert_eq!(commit.inner.value, 10);
 
-        let db_transaction = client.transaction().await?;
-        let transaction = PostgresEventStore::new(&db_transaction);
+        let mut db_transaction = client.transaction().await?;
+        let transaction = PostgresEventStore::new(&mut db_transaction);
         transaction.append(&id, Event::Decrement(4)).await?;
         db_transaction.rollback().await?;
 
-        let event_store = PostgresEventStore::new(&client);
+        let event_store = PostgresEventStore::new(&mut client);
         let commit: Commit<State> = event_store.try_get_commit(&id).await?;
         assert_eq!(commit.version, 1);
         assert_eq!(commit.inner.value, 10);
@@ -601,9 +601,9 @@ mod tests {
     #[tokio::test]
     async fn test_snapshot() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let client = test_db.client().await;
+        let mut client = test_db.client().await;
 
-        let event_store = event_store(&client)
+        let event_store = event_store(&mut client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -643,11 +643,11 @@ mod tests {
     #[cfg(feature = "streaming")]
     async fn test_streaming() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let client = test_db.client().await;
+        let mut client = test_db.client().await;
         PostgresEventStore::initialize(&client).await?;
         PostgresEventStore::clear(&client).await?;
 
-        let event_store = PostgresEventStore::new(&client);
+        let event_store = PostgresEventStore::new(&mut client);
         // Implement Stream as a custom struct with `next().await` method
         // Drop the client when the last event is received
         let stream = PostgresEventStream::new(test_db.tokio_postgres_config().await)
@@ -723,11 +723,11 @@ mod tests {
     #[cfg(feature = "streaming")]
     async fn test_streaming_after_writes() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let client = test_db.client().await;
+        let mut client = test_db.client().await;
         PostgresEventStore::initialize(&client).await?;
         PostgresEventStore::clear(&client).await?;
 
-        let event_store = PostgresEventStore::new(&client);
+        let event_store = PostgresEventStore::new(&mut client);
 
         let events_to_send = vec![
             Event::Increment(10),
@@ -810,8 +810,8 @@ mod tests {
         });
         let pool = cfg.create_pool(Some(Runtime::Tokio1), NoTls).unwrap();
 
-        let client = pool.get().await.expect("Failed to get client from pool");
-        let event_store = event_store(&client).await?;
+        let mut client = pool.get().await.expect("Failed to get client from pool");
+        let event_store = event_store(&mut client).await?;
 
         let id = State::id("test6");
         event_store.append(&id, Event::Increment(10)).await?;
@@ -827,8 +827,8 @@ mod tests {
     #[tokio::test]
     async fn test_not_found() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let client = test_db.client().await;
-        let event_store = event_store(&client)
+        let mut client = test_db.client().await;
+        let event_store = event_store(&mut client)
             .await
             .expect("msg: Failed to create event store");
 
@@ -848,8 +848,8 @@ mod tests {
     #[tokio::test]
     async fn test_commands() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
-        let client = test_db.client().await;
-        let event_store = event_store(&client)
+        let mut client = test_db.client().await;
+        let event_store = event_store(&mut client)
             .await
             .expect("msg: Failed to create event store");
 
