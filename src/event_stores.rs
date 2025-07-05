@@ -205,11 +205,16 @@ pub trait EventStore: Sync {
         }
     }
 
-    fn load<L: Loadable>(&self, loadable: L) -> impl Future<Output = Result<L::Output>>
+    /// Loads one or more aggregates based on the passed value.
+    ///
+    /// - [`Id<Aggregate>`](crate::Id) can be used to load a single aggregate
+    /// - [`Vec<Id<Aggregate>>`](std::vec::Vec) can be used to load multiple aggregates
+    /// - [`HashMap<K, V = Id<Aggregate>>`](std::collections::HashMap) can be used to load multiple aggregates as a hash
+    fn load<L: Loadable>(&self, value: L) -> impl Future<Output = Result<L::Output>>
     where
         Self: Sized,
     {
-        loadable.load(self)
+        value.load(self)
     }
 }
 

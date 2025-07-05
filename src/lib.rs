@@ -1,16 +1,18 @@
 mod aggregate;
 pub mod event_stores;
+mod id;
 #[cfg(feature = "streaming")]
 #[cfg(feature = "postgres")]
 mod subscriber;
 mod util;
 
-pub use aggregate::{Aggregate, Id, id};
+pub use aggregate::Aggregate;
 #[cfg(feature = "inmem")]
 pub use event_stores::InMemoryEventStore;
 #[cfg(feature = "postgres")]
 pub use event_stores::PostgresEventStore;
 pub use event_stores::{Commit, Error, EventStore, Result};
+pub use id::{Id, id};
 
 #[cfg(feature = "streaming")]
 pub use event_stores::{EventStream, StreamingEventStore};
@@ -24,7 +26,6 @@ pub use event_stores::postgres::PostgresEventStream;
 pub use subscriber::{Subscriber, Subscription};
 
 #[cfg(test)]
-#[allow(dead_code)]
 mod tests {
     use serde::{Deserialize, Serialize};
 
