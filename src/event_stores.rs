@@ -139,23 +139,6 @@ pub trait EventStore: Sync {
         Ok(None)
     }
 
-    async fn retry_on_version_conflict<'a, 'b, F, Fut, R>(&'a self, mut f: F) -> Result<R>
-    where
-        F: FnMut() -> Fut + Send + 'b,
-        Fut: std::future::Future<Output = Result<R>> + Send + 'b,
-        'a: 'b,
-    {
-        loop {
-            match f().await {
-                Ok(res) => return Ok(res),
-                Err(Error::VersionConflict(_)) => {
-                    eprintln!("Version conflict occurred, retrying...");
-                }
-                Err(e) => return Err(e),
-            }
-        }
-    }
-
     /// Loads one or more aggregates based on the passed value.
     ///
     /// - [`Id<Aggregate>`](crate::Id) can be used to load a single aggregate
@@ -167,5 +150,21 @@ pub trait EventStore: Sync {
         Self: Sized,
     {
         value.load(self)
+    }
+}
+
+pub async fn retry_on_version_conflict<F, Fut, R>(mut f: F) -> Result<R>
+where
+    F: FnMut() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<R>> + Send,
+{
+    loop {
+        match f().await {
+            Ok(res) => return Ok(res),
+            Err(Error::VersionConflict(_)) => {
+                eprintln!("Version conflict occurred, retrying...");
+            }
+            Err(e) => return Err(e),
+        }
     }
 }

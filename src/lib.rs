@@ -13,7 +13,7 @@ pub use commit::Commit;
 pub use event_stores::InMemoryEventStore;
 #[cfg(feature = "postgres")]
 pub use event_stores::PostgresEventStore;
-pub use event_stores::{Error, EventStore, Result};
+pub use event_stores::{Error, EventStore, Result, retry_on_version_conflict};
 pub use id::{Id, id};
 
 #[cfg(feature = "streaming")]
@@ -63,21 +63,20 @@ mod tests {
 
     pub mod commands {
         use super::{Event, State};
-        use crate::{EventStore, Id, Result};
+        use crate::{EventStore, Id, Result, retry_on_version_conflict};
 
         pub async fn increment(
             event_store: &impl EventStore,
             id: &Id<State>,
             amount: i32,
         ) -> Result<()> {
-            event_store
-                .retry_on_version_conflict(|| async {
-                    let aggregate = event_store.try_get_commit(id).await?;
-                    let event = Event::Increment(amount);
-                    event_store.commit(id, aggregate.version + 1, event).await?;
-                    Ok(())
-                })
-                .await
+            retry_on_version_conflict(async || {
+                let aggregate = event_store.try_get_commit(id).await?;
+                let event = Event::Increment(amount);
+                event_store.commit(id, aggregate.version + 1, event).await?;
+                Ok(())
+            })
+            .await
         }
 
         pub async fn decrement(
@@ -85,14 +84,13 @@ mod tests {
             id: &Id<State>,
             amount: i32,
         ) -> Result<()> {
-            event_store
-                .retry_on_version_conflict(|| async {
-                    let aggregate = event_store.try_get_commit(id).await?;
-                    let event = Event::Decrement(amount);
-                    event_store.commit(id, aggregate.version + 1, event).await?;
-                    Ok(())
-                })
-                .await
+            retry_on_version_conflict(async || {
+                let aggregate = event_store.try_get_commit(id).await?;
+                let event = Event::Decrement(amount);
+                event_store.commit(id, aggregate.version + 1, event).await?;
+                Ok(())
+            })
+            .await
         }
     }
 

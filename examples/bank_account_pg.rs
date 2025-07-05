@@ -1,6 +1,6 @@
 use espg::{
     Aggregate, EventStore, Id, PostgresEventStore, PostgresEventStream, StreamItem,
-    StreamingEventStore,
+    StreamingEventStore, retry_on_version_conflict,
 };
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -76,15 +76,14 @@ async fn withdraw_money(
     id: &Id<AccountState>,
     amount: i64,
 ) -> Result<(), espg::Error> {
-    event_store
-        .retry_on_version_conflict(|| async {
-            #[allow(clippy::unwrap_used)]
-            let commit = event_store.get_commit(id).await.unwrap();
-            event_store
-                .commit(id, commit.version + 1, Event::MoneyWithdrawn(amount))
-                .await
-        })
-        .await
+    retry_on_version_conflict(async || {
+        #[allow(clippy::unwrap_used)]
+        let commit = event_store.get_commit(id).await.unwrap();
+        event_store
+            .commit(id, commit.version + 1, Event::MoneyWithdrawn(amount))
+            .await
+    })
+    .await
 }
 
 async fn close_account(
