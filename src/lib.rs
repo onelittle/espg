@@ -1,4 +1,5 @@
 mod aggregate;
+mod commit;
 mod event_stores;
 mod id;
 #[cfg(feature = "streaming")]
@@ -7,11 +8,12 @@ mod subscriber;
 mod util;
 
 pub use aggregate::Aggregate;
+pub use commit::Commit;
 #[cfg(feature = "inmem")]
 pub use event_stores::InMemoryEventStore;
 #[cfg(feature = "postgres")]
 pub use event_stores::PostgresEventStore;
-pub use event_stores::{Commit, Error, EventStore, Result};
+pub use event_stores::{Error, EventStore, Result};
 pub use id::{Id, id};
 
 #[cfg(feature = "streaming")]

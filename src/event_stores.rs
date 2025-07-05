@@ -9,10 +9,7 @@ mod streaming;
 
 use std::collections::HashMap;
 
-use crate::{
-    Aggregate, Id,
-    util::{Loadable, Txid},
-};
+use crate::{Aggregate, Commit, Id, util::Loadable};
 use async_trait::async_trait;
 #[cfg(feature = "streaming")]
 use futures::Stream;
@@ -20,7 +17,7 @@ use futures::Stream;
 pub use in_memory::InMemoryEventStore;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresEventStore;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 #[cfg(feature = "streaming")]
 pub use streaming::EventStream;
 
@@ -57,50 +54,6 @@ impl PartialEq for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub(crate) struct Diagnostics {
-    pub loaded_events: usize,
-    pub snapshotted: bool,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct Commit<T> {
-    pub id: String,
-    pub version: usize,
-    pub inner: T,
-    pub(crate) diagnostics: Option<Diagnostics>,
-    pub(crate) global_seq: Option<Txid>,
-}
-
-impl<T> Commit<T> {
-    pub fn into_inner(self) -> T {
-        self.inner
-    }
-}
-
-#[cfg(feature = "async-graphql")]
-#[async_graphql::Object]
-impl<T: async_graphql::OutputType> Commit<T> {
-    async fn id(&self) -> String {
-        self.id.clone()
-    }
-
-    async fn version(&self) -> usize {
-        self.version
-    }
-
-    async fn inner(&self) -> &T {
-        &self.inner
-    }
-}
-
-#[cfg(feature = "async-graphql")]
-impl<T: async_graphql::OutputType> async_graphql::TypeName for Commit<T> {
-    fn type_name() -> std::borrow::Cow<'static, str> {
-        format!("{}Commit", <T as async_graphql::OutputType>::type_name()).into()
-    }
-}
 
 #[async_trait]
 pub trait EventStore: Sync {

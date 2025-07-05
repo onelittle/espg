@@ -1,7 +1,7 @@
 use super::{Error, Result};
 use crate::{
     Aggregate, EventStore, Id,
-    event_stores::{Commit, Diagnostics},
+    commit::{Commit, Diagnostics},
     util::Txid,
 };
 #[cfg(feature = "streaming")]
