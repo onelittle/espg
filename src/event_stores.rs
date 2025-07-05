@@ -7,7 +7,12 @@ pub(crate) mod sql_helpers;
 #[cfg(feature = "streaming")]
 mod streaming;
 
-use crate::{Aggregate, Id, util::Txid};
+use std::collections::HashMap;
+
+use crate::{
+    Aggregate, Id,
+    util::{Loadable, Txid},
+};
 use async_trait::async_trait;
 #[cfg(feature = "streaming")]
 use futures::Stream;
@@ -67,6 +72,13 @@ pub struct Commit<T> {
     pub diagnostics: Option<Diagnostics>,
     pub global_seq: Option<Txid>,
 }
+
+impl<T> Commit<T> {
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
 #[cfg(feature = "async-graphql")]
 #[async_graphql::Object]
 impl<T: async_graphql::OutputType> Commit<T> {
@@ -147,6 +159,17 @@ pub trait EventStore: Sync {
             Err(_) => None,
         }
     }
+    async fn get_commits<X: Aggregate>(&self, ids: &[Id<X>]) -> Result<HashMap<Id<X>, Commit<X>>> {
+        let mut commits = HashMap::new();
+        for id in ids {
+            let commit = self
+                .get_commit(id)
+                .await
+                .ok_or(Error::NotFound(id.to_string()))?;
+            commits.insert(id.clone(), commit);
+        }
+        Ok(commits)
+    }
     async fn try_get_aggregate<X: Aggregate + Default>(&self, id: &Id<X>) -> Result<X> {
         self.try_get_commit(id).await.map(|r| r.inner)
     }
@@ -181,6 +204,13 @@ pub trait EventStore: Sync {
             }
         }
     }
+
+    fn load<L: Loadable>(&self, loadable: L) -> impl Future<Output = Result<L::Output>>
+    where
+        Self: Sized,
+    {
+        loadable.load(self)
+    }
 }
 
 #[cfg(feature = "streaming")]
@@ -200,4 +230,25 @@ pub type StreamItem<T> = std::result::Result<Commit<T>, StreamItemError>;
 pub trait StreamingEventStore {
     #[cfg(feature = "streaming")]
     async fn stream<T: Aggregate>(self) -> Result<impl Stream<Item = StreamItem<T::Event>>>;
+
+    #[cfg(feature = "streaming")]
+    async fn stream_by_id<T: Aggregate + 'static>(
+        self,
+        id: Id<T>,
+    ) -> Result<impl Stream<Item = StreamItem<T::Event>>>
+    where
+        Self: Sized,
+    {
+        use futures::StreamExt;
+
+        let main_stream = self.stream::<T>().await?;
+        Ok(main_stream.filter(move |item| {
+            use futures::future;
+
+            future::ready(match item {
+                Ok(commit) => commit.id == id.to_string(),
+                Err(_) => false,
+            })
+        }))
+    }
 }
