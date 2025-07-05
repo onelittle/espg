@@ -13,7 +13,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use super::{Commit, Error, EventStore, Result};
 use crate::{Aggregate, Id, util::Txid};
 #[cfg(feature = "streaming")]
-use crate::{StreamingEventStore, event_stores::StreamItem};
+use crate::{event_stores::streaming::StreamItem, event_stores::streaming::StreamingEventStore};
 
 type CommitTuple = Vec<(Txid, Box<dyn Any + Send + Sync>)>;
 

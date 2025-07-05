@@ -11,15 +11,13 @@ use std::collections::HashMap;
 
 use crate::{Aggregate, Commit, Id, util::Loadable};
 use async_trait::async_trait;
-#[cfg(feature = "streaming")]
-use futures::Stream;
 #[cfg(feature = "inmem")]
 pub use in_memory::InMemoryEventStore;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresEventStore;
 use serde::{Serialize, de::DeserializeOwned};
 #[cfg(feature = "streaming")]
-pub use streaming::EventStream;
+pub use streaming::{StreamItem, StreamingEventStore};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -40,7 +38,7 @@ pub enum Error {
     SerdeJsonError(#[from] serde_json::Error),
     #[cfg(feature = "streaming")]
     #[error("streaming error: {0}")]
-    StreamingError(#[from] StreamItemError),
+    StreamingError(#[from] streaming::StreamItemError),
 }
 
 impl PartialEq for Error {
@@ -169,45 +167,5 @@ pub trait EventStore: Sync {
         Self: Sized,
     {
         value.load(self)
-    }
-}
-
-#[cfg(feature = "streaming")]
-#[derive(thiserror::Error, Debug)]
-#[non_exhaustive]
-pub enum StreamItemError {
-    #[cfg(feature = "postgres")]
-    #[error("Tokio Postgres error: {0}")]
-    TokioPgError(#[from] tokio_postgres::Error),
-}
-
-#[cfg(feature = "streaming")]
-pub type StreamItem<T> = std::result::Result<Commit<T>, StreamItemError>;
-
-#[cfg(feature = "streaming")]
-#[allow(async_fn_in_trait)]
-pub trait StreamingEventStore {
-    #[cfg(feature = "streaming")]
-    async fn stream<T: Aggregate>(self) -> Result<impl Stream<Item = StreamItem<T::Event>>>;
-
-    #[cfg(feature = "streaming")]
-    async fn stream_by_id<T: Aggregate + 'static>(
-        self,
-        id: Id<T>,
-    ) -> Result<impl Stream<Item = StreamItem<T::Event>>>
-    where
-        Self: Sized,
-    {
-        use futures::StreamExt;
-
-        let main_stream = self.stream::<T>().await?;
-        Ok(main_stream.filter(move |item| {
-            use futures::future;
-
-            future::ready(match item {
-                Ok(commit) => commit.id == id.to_string(),
-                Err(_) => false,
-            })
-        }))
     }
 }

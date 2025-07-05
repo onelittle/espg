@@ -17,7 +17,7 @@ pub use event_stores::{Error, EventStore, Result};
 pub use id::{Id, id};
 
 #[cfg(feature = "streaming")]
-pub use event_stores::{EventStream, StreamItem, StreamingEventStore};
+pub use event_stores::{StreamItem, StreamingEventStore};
 
 #[cfg(feature = "streaming")]
 #[cfg(feature = "postgres")]

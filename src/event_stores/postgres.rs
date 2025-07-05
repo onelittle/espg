@@ -1,11 +1,11 @@
 use super::{Error, Result};
+#[cfg(feature = "streaming")]
+use crate::event_stores::streaming::{EventStream, StreamItem, StreamingEventStore};
 use crate::{
     Aggregate, EventStore, Id,
     commit::{Commit, Diagnostics},
     util::Txid,
 };
-#[cfg(feature = "streaming")]
-use crate::{EventStream, StreamingEventStore, event_stores::StreamItem};
 use async_trait::async_trait;
 #[cfg(feature = "streaming")]
 use futures::Stream;
@@ -412,7 +412,7 @@ impl PostgresEventStream {
                         let rows = match rows {
                             Ok(rows) => rows,
                             Err(e) => {
-                                use crate::event_stores::StreamItemError;
+                                use crate::event_stores::streaming::StreamItemError;
 
                                 eprintln!("Error querying events: {}", e);
                                 if tx2.send(Err(StreamItemError::from(e))).is_err() {
