@@ -252,7 +252,6 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::*;
-    use crate::event_stores::postgres;
     use crate::tests::{Event, State};
     use crate::{EventStore, InMemoryEventStore, PostgresEventStore, Result};
 
@@ -289,8 +288,8 @@ mod tests {
         let client = test_db.client().await;
         let config = test_db.tokio_postgres_config().await;
 
-        postgres::initialize(&client).await?;
-        postgres::clear(&client).await?;
+        PostgresEventStore::initialize(&client).await?;
+        PostgresEventStore::clear(&client).await?;
 
         // let event_store = PostgresEventStore::new(&client);
         // let subscriber = TestSubscriber::default();
@@ -320,8 +319,8 @@ mod tests {
         let client = test_db.client().await;
         let config = test_db.tokio_postgres_config().await;
 
-        postgres::initialize(&client).await?;
-        postgres::clear(&client).await?;
+        PostgresEventStore::initialize(&client).await?;
+        PostgresEventStore::clear(&client).await?;
 
         let event_store = PostgresEventStore::new(&client);
         let invocations = Arc::new(Mutex::new(0));

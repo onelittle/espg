@@ -96,8 +96,8 @@ async fn main() -> espg::Result<()> {
         }
     });
 
-    espg::event_stores::postgres::destroy(&client).await?;
-    espg::event_stores::postgres::initialize(&client).await?;
+    PostgresEventStore::destroy(&client).await?;
+    PostgresEventStore::initialize(&client).await?;
 
     println!("Starting benchmark...");
     // Initialize the event store

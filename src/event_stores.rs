@@ -59,7 +59,7 @@ impl PartialEq for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct Diagnostics {
+pub(crate) struct Diagnostics {
     pub loaded_events: usize,
     pub snapshotted: bool,
 }
@@ -69,8 +69,8 @@ pub struct Commit<T> {
     pub id: String,
     pub version: usize,
     pub inner: T,
-    pub diagnostics: Option<Diagnostics>,
-    pub global_seq: Option<Txid>,
+    pub(crate) diagnostics: Option<Diagnostics>,
+    pub(crate) global_seq: Option<Txid>,
 }
 
 impl<T> Commit<T> {
@@ -210,6 +210,7 @@ pub trait EventStore: Sync {
     /// - [`Id<Aggregate>`](crate::Id) can be used to load a single aggregate
     /// - [`Vec<Id<Aggregate>>`](std::vec::Vec) can be used to load multiple aggregates
     /// - [`HashMap<K, V = Id<Aggregate>>`](std::collections::HashMap) can be used to load multiple aggregates as a hash
+    #[allow(private_bounds)]
     fn load<L: Loadable>(&self, value: L) -> impl Future<Output = Result<L::Output>>
     where
         Self: Sized,

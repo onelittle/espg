@@ -1,5 +1,5 @@
 mod aggregate;
-pub mod event_stores;
+mod event_stores;
 mod id;
 #[cfg(feature = "streaming")]
 #[cfg(feature = "postgres")]
@@ -15,7 +15,7 @@ pub use event_stores::{Commit, Error, EventStore, Result};
 pub use id::{Id, id};
 
 #[cfg(feature = "streaming")]
-pub use event_stores::{EventStream, StreamingEventStore};
+pub use event_stores::{EventStream, StreamItem, StreamingEventStore};
 
 #[cfg(feature = "streaming")]
 #[cfg(feature = "postgres")]
@@ -190,8 +190,8 @@ mod test_helper {
                 }
             });
 
-            crate::event_stores::postgres::initialize(&client).await?;
-            crate::event_stores::postgres::clear(&client).await?;
+            crate::event_stores::PostgresEventStore::initialize(&client).await?;
+            crate::event_stores::PostgresEventStore::clear(&client).await?;
             self.initialized
                 .store(true, std::sync::atomic::Ordering::SeqCst);
 

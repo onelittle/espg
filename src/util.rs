@@ -1,5 +1,5 @@
 mod loadable;
 mod txid;
 
-pub use loadable::Loadable;
-pub use txid::Txid;
+pub(crate) use loadable::Loadable;
+pub(crate) use txid::Txid;

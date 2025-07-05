@@ -1,6 +1,6 @@
 use espg::{
-    Aggregate, EventStore, Id, PostgresEventStore, PostgresEventStream, StreamingEventStore,
-    event_stores::StreamItem,
+    Aggregate, EventStore, Id, PostgresEventStore, PostgresEventStream, StreamItem,
+    StreamingEventStore,
 };
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -122,8 +122,8 @@ async fn main() -> espg::Result<()> {
 
     let mut active_accounts = 0;
     let mut total_balance = 0;
-    espg::event_stores::postgres::initialize(&client).await?;
-    espg::event_stores::postgres::clear(&client).await?;
+    PostgresEventStore::initialize(&client).await?;
+    PostgresEventStore::clear(&client).await?;
 
     let stream = init_event_stream().await;
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{Aggregate, Error, EventStore, Id, Result};
 
-pub trait Loadable {
+pub(crate) trait Loadable {
     type Output;
 
     fn load(self, store: &impl EventStore) -> impl Future<Output = Result<Self::Output>>;

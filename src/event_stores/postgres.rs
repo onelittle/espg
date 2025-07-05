@@ -51,60 +51,62 @@ where
     }
 }
 
-#[mutants::skip]
-pub async fn initialize(
-    client: &tokio_postgres::Client,
-) -> std::result::Result<(), tokio_postgres::Error> {
-    // Create the necessary tables if they do not exist
-    client
-        .batch_execute(super::sql_helpers::CREATE_EVENTS)
-        .await?;
+impl PostgresEventStore<'_, tokio_postgres::Client> {
+    #[mutants::skip]
+    pub async fn initialize(
+        client: &tokio_postgres::Client,
+    ) -> std::result::Result<(), tokio_postgres::Error> {
+        // Create the necessary tables if they do not exist
+        client
+            .batch_execute(super::sql_helpers::CREATE_EVENTS)
+            .await?;
 
-    client
-        .batch_execute(super::sql_helpers::CREATE_SNAPSHOTS)
-        .await?;
+        client
+            .batch_execute(super::sql_helpers::CREATE_SNAPSHOTS)
+            .await?;
 
-    client
-        .batch_execute(super::sql_helpers::CREATE_SUBSCRIPTIONS)
-        .await?;
+        client
+            .batch_execute(super::sql_helpers::CREATE_SUBSCRIPTIONS)
+            .await?;
 
-    client
-        .batch_execute(super::sql_helpers::CREATE_TRIGGER)
-        .await?;
+        client
+            .batch_execute(super::sql_helpers::CREATE_TRIGGER)
+            .await?;
 
-    Ok(())
-}
+        Ok(())
+    }
 
-#[mutants::skip]
-pub async fn clear(
-    client: &tokio_postgres::Client,
-) -> std::result::Result<(), tokio_postgres::Error> {
-    client
-        .batch_execute(
-            r#"
-            DELETE FROM events;
-            DELETE FROM snapshots;
-            DELETE FROM subscriptions;
-        "#,
-        )
-        .await?;
-    Ok(())
-}
+    #[mutants::skip]
+    pub async fn clear(
+        client: &tokio_postgres::Client,
+    ) -> std::result::Result<(), tokio_postgres::Error> {
+        client
+            .batch_execute(
+                r#"
+                DELETE FROM events;
+                DELETE FROM snapshots;
+                DELETE FROM subscriptions;
+            "#,
+            )
+            .await?;
+        Ok(())
+    }
 
-#[mutants::skip]
-pub async fn destroy(
-    client: &tokio_postgres::Client,
-) -> std::result::Result<(), tokio_postgres::Error> {
-    client
-        .batch_execute(
-            r#"
-            DROP TABLE IF EXISTS events;
-            DROP TABLE IF EXISTS snapshots;
-            DROP TABLE IF EXISTS subscriptions;
-        "#,
-        )
-        .await?;
-    Ok(())
+    #[mutants::skip]
+    pub async fn destroy(
+        client: &tokio_postgres::Client,
+    ) -> std::result::Result<(), tokio_postgres::Error> {
+        client
+            .batch_execute(
+                r#"
+                DROP TABLE IF EXISTS events;
+                DROP TABLE IF EXISTS snapshots;
+                DROP TABLE IF EXISTS subscriptions;
+            "#,
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -490,11 +492,11 @@ mod tests {
         'a: 'b,
     {
         let event_store = PostgresEventStore::new(client);
-        super::initialize(client)
+        PostgresEventStore::initialize(client)
             .await
             .expect("Failed to initialize event store");
 
-        super::clear(client)
+        PostgresEventStore::clear(client)
             .await
             .expect("Failed to clear event store");
 
@@ -505,8 +507,8 @@ mod tests {
     async fn test_postgres_event_store() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
         let mut client = test_db.client().await;
-        super::initialize(&client).await?;
-        super::clear(&client).await?;
+        PostgresEventStore::initialize(&client).await?;
+        PostgresEventStore::clear(&client).await?;
 
         let db_transaction = client.transaction().await?;
         let transaction = PostgresEventStore::new(&db_transaction);
@@ -642,8 +644,8 @@ mod tests {
     async fn test_streaming() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
         let client = test_db.client().await;
-        super::initialize(&client).await?;
-        super::clear(&client).await?;
+        PostgresEventStore::initialize(&client).await?;
+        PostgresEventStore::clear(&client).await?;
 
         let event_store = PostgresEventStore::new(&client);
         // Implement Stream as a custom struct with `next().await` method
@@ -722,8 +724,8 @@ mod tests {
     async fn test_streaming_after_writes() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
         let client = test_db.client().await;
-        super::initialize(&client).await?;
-        super::clear(&client).await?;
+        PostgresEventStore::initialize(&client).await?;
+        PostgresEventStore::clear(&client).await?;
 
         let event_store = PostgresEventStore::new(&client);
 
