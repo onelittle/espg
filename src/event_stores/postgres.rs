@@ -4,6 +4,7 @@ use crate::event_stores::streaming::{EventStream, StreamItem, StreamingEventStor
 use crate::{
     Aggregate, EventStore, Id,
     commit::{Commit, Diagnostics},
+    event_stores::Transaction,
     util::Txid,
 };
 use async_trait::async_trait;
@@ -16,7 +17,6 @@ use tokio_postgres::{GenericClient, types::Json};
 
 pub struct PostgresEventStore<'a, Db> {
     pub(crate) client: &'a mut Db,
-    snapshot_interval: usize,
 }
 
 impl<Db> PostgresEventStore<'_, Db>
@@ -24,10 +24,7 @@ where
     Db: GenericClient,
 {
     pub fn new<'a>(client: &'a mut Db) -> PostgresEventStore<'a, Db> {
-        PostgresEventStore {
-            client,
-            snapshot_interval: 10,
-        }
+        PostgresEventStore { client }
     }
 
     #[allow(clippy::expect_used)]
@@ -51,7 +48,7 @@ where
     }
 }
 
-impl PostgresEventStore<'_, tokio_postgres::Client> {
+impl<'a> PostgresEventStore<'a, tokio_postgres::Client> {
     #[mutants::skip]
     pub async fn initialize(
         client: &tokio_postgres::Client,
@@ -109,8 +106,50 @@ impl PostgresEventStore<'_, tokio_postgres::Client> {
     }
 }
 
+impl<'a> super::Transaction<tokio_postgres::Transaction<'a>> {
+    pub fn new(txn: tokio_postgres::Transaction<'a>) -> Self {
+        Self { txn }
+    }
+
+    pub async fn commit(self) -> Result<()> {
+        self.txn.commit().await.map_err(|e| {
+            if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
+                Error::VersionConflict(0)
+            } else {
+                panic!("Failed to commit transaction: {}", e)
+            }
+        })
+    }
+
+    pub async fn rollback(self) -> Result<()> {
+        Ok(self.txn.rollback().await?)
+    }
+}
+
+trait GenericClientStore {
+    fn get_client(&self) -> &impl GenericClient;
+}
+
+impl GenericClientStore for PostgresEventStore<'_, tokio_postgres::Client> {
+    fn get_client(&self) -> &impl GenericClient {
+        self.client
+    }
+}
+
+impl GenericClientStore for PostgresEventStore<'_, tokio_postgres::Transaction<'_>> {
+    fn get_client(&self) -> &impl GenericClient {
+        self.client
+    }
+}
+
+impl GenericClientStore for Transaction<tokio_postgres::Transaction<'_>> {
+    fn get_client(&self) -> &impl GenericClient {
+        &self.txn
+    }
+}
+
 #[async_trait]
-impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
+impl<T: GenericClientStore + Sync> EventStore for T {
     async fn try_get_events_between<X: Aggregate>(
         &self,
         id: &Id<X>,
@@ -120,7 +159,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
         let min_version = min_version as i32;
         let max_version = max_version.map(|v| v as i32).unwrap_or(i32::MAX);
         let rows = self
-            .client
+            .get_client()
             .query(
                 "SELECT version, action, global_seq::text FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version BETWEEN $3 AND $4 ORDER BY version",
                 &[&id.0, &X::NAME, &min_version, &max_version],
@@ -196,7 +235,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
         action: X::Event,
     ) -> Result<()> {
         let json_action: Value = serde_json::to_value(action.clone())?;
-        self.client
+        self.get_client()
             .execute(
                 "INSERT INTO events (aggregate_id, aggregate_type, version, action) VALUES ($1, $2, $3, $4)",
                 &[&id.0, &X::NAME, &(version as i32), &json_action],
@@ -210,7 +249,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
                 }
             })?;
 
-        if version % self.snapshot_interval == 0 {
+        if version % X::SNAPSHOT_INTERVAL == 0 {
             self.store_snapshot::<X>(id).await?;
         }
 
@@ -229,7 +268,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
             global_seq: _,
         } = self.try_get_commit(id).await?;
         let snapshot: Value = serde_json::to_value(inner)?;
-        self.client
+        self.get_client()
             .execute(
                 r#"
                 INSERT INTO snapshots (aggregate_id, aggregate_type, key, version, snapshot)
@@ -247,7 +286,7 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
             return Ok(None);
         };
         let row = self
-                .client
+                .get_client()
                 .query_opt(
                     "SELECT version, snapshot FROM snapshots WHERE aggregate_id = $1 AND aggregate_type = $2 AND key = $3",
                     &[&id.0, &X::NAME, &key],
@@ -297,6 +336,18 @@ impl<Db: GenericClient + Sync> EventStore for PostgresEventStore<'_, Db> {
                 return Err(Error::VersionConflict(version));
             }
         }
+    }
+}
+
+impl<'a> PostgresEventStore<'a, tokio_postgres::Client> {
+    pub async fn transaction<'b>(
+        &'a mut self,
+    ) -> Result<super::Transaction<tokio_postgres::Transaction<'b>>>
+    where
+        'a: 'b,
+    {
+        let txn = self.client.transaction().await?;
+        Ok(super::Transaction::new(txn))
     }
 }
 
@@ -510,8 +561,8 @@ mod tests {
         PostgresEventStore::initialize(&client).await?;
         PostgresEventStore::clear(&client).await?;
 
-        let mut db_transaction = client.transaction().await?;
-        let transaction = PostgresEventStore::new(&mut db_transaction);
+        let mut event_store = PostgresEventStore::new(&mut client);
+        let transaction = event_store.transaction().await?;
 
         let id = State::id("test1");
         transaction.append(&id, Event::Increment(10)).await?;
@@ -585,10 +636,10 @@ mod tests {
         assert_eq!(commit.version, 1);
         assert_eq!(commit.inner.value, 10);
 
-        let mut db_transaction = client.transaction().await?;
-        let transaction = PostgresEventStore::new(&mut db_transaction);
+        let mut event_store = PostgresEventStore::new(&mut client);
+        let transaction = event_store.transaction().await?;
         transaction.append(&id, Event::Decrement(4)).await?;
-        db_transaction.rollback().await?;
+        transaction.rollback().await?;
 
         let event_store = PostgresEventStore::new(&mut client);
         let commit: Commit<State> = event_store.try_get_commit(&id).await?;

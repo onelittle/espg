@@ -9,6 +9,7 @@ where
     type Event: Clone + Send + Sync + 'static + DeserializeOwned + serde::Serialize;
 
     const NAME: &'static str;
+    const SNAPSHOT_INTERVAL: usize = 10;
 
     fn reduce(self, event: &Self::Event) -> Self;
     fn from_slice(events: &[Self::Event]) -> Self
@@ -19,6 +20,7 @@ where
             .iter()
             .fold(Self::default(), |state, event| state.reduce(event))
     }
+    // TODO: This should return a digest of the reducer
     fn snapshot_key() -> Option<&'static str> {
         None
     }

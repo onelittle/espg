@@ -153,6 +153,10 @@ pub trait EventStore: Sync {
     }
 }
 
+pub struct Transaction<T> {
+    pub(crate) txn: T,
+}
+
 pub async fn retry_on_version_conflict<F, Fut, R>(mut f: F) -> Result<R>
 where
     F: FnMut() -> Fut + Send,
