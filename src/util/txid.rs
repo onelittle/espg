@@ -41,10 +41,11 @@ impl AddAssign<i64> for Txid {
 }
 
 #[allow(clippy::expect_used)]
-impl From<String> for Txid {
-    fn from(val: String) -> Self {
-        eprintln!("Parsing txid from string: {}", val);
-        Txid(val.parse().expect("Failed to parse txid"))
+impl TryFrom<String> for Txid {
+    type Error = std::num::ParseIntError;
+
+    fn try_from(val: String) -> Result<Self, Self::Error> {
+        Ok(Txid(val.parse()?))
     }
 }
 

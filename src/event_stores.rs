@@ -39,6 +39,8 @@ pub enum Error {
     #[cfg(feature = "streaming")]
     #[error("streaming error: {0}")]
     StreamingError(#[from] streaming::StreamItemError),
+    #[error("txid parsing error: {0}")]
+    TxIdParsingError(#[from] std::num::ParseIntError),
 }
 
 impl PartialEq for Error {

@@ -171,7 +171,7 @@ impl<T: GenericClientStore + Sync> EventStore for T {
             .map(|row| {
                 let version: i32 = row.get(0);
                 let global_seq: String = row.get(2);
-                let global_seq: Txid = global_seq.into();
+                let global_seq: Txid = global_seq.try_into().expect("Failed to parse global_seq");
                 (version as usize, Some(global_seq))
             })
             .unwrap_or(((min_version - 1) as usize, None));
@@ -407,7 +407,7 @@ impl PostgresEventStream {
                 let version: i32 = row.get(1);
                 let action: Json<T::Event> = row.get(2);
                 let global_seq: String = row.get(3);
-                let global_seq = global_seq.into();
+                let global_seq = global_seq.try_into().expect("Failed to parse global_seq");
 
                 // Create a Commit from the row data
                 let commit = Commit {
@@ -478,7 +478,8 @@ impl PostgresEventStream {
                             let version: i32 = row.get(1);
                             let action: Json<T::Event> = row.get(2);
                             let global_seq: String = row.get(3);
-                            let global_seq = global_seq.into();
+                            let global_seq =
+                                global_seq.try_into().expect("Failed to parse global_seq");
 
                             // Create a Commit from the row data
                             let commit = Commit {
