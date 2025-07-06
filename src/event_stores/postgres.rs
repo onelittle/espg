@@ -171,10 +171,10 @@ impl<T: GenericClientStore + Sync> EventStore for T {
             .map(|row| {
                 let version: i32 = row.get(0);
                 let global_seq: String = row.get(2);
-                let global_seq: Txid = global_seq.try_into().expect("Failed to parse global_seq");
-                (version as usize, Some(global_seq))
+                let global_seq: Txid = global_seq.try_into()?;
+                Result::Ok((version as usize, Some(global_seq)))
             })
-            .unwrap_or(((min_version - 1) as usize, None));
+            .unwrap_or(Ok(((min_version - 1) as usize, None)))?;
 
         if version == 0 {
             return Err(Error::NotFound("No events found".to_string()));

@@ -7,11 +7,12 @@ use async_trait::async_trait;
 #[cfg(feature = "streaming")]
 use futures::Stream;
 use indexmap::IndexMap;
+use tokio::sync::Mutex;
 #[cfg(feature = "streaming")]
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::{Commit, Error, EventStore, Result};
-use crate::{Aggregate, Id, util::Txid};
+use crate::{Aggregate, Id, event_stores::Transaction, util::Txid};
 #[cfg(feature = "streaming")]
 use crate::{event_stores::streaming::StreamItem, event_stores::streaming::StreamingEventStore};
 
@@ -27,6 +28,7 @@ pub struct InMemoryEventStore {
     _rx: Option<tokio::sync::broadcast::Receiver<Commit<String>>>,
     #[cfg(test)]
     pub(crate) version_conflicts: AtomicUsize,
+    pub(crate) locked: Arc<Mutex<bool>>,
 }
 
 impl InMemoryEventStore {
@@ -43,6 +45,37 @@ impl InMemoryEventStore {
         let store = self.store.read().await;
         store.is_empty()
     }
+
+    pub async fn transaction(&mut self) -> Result<Transaction<&mut Self>> {
+        {
+            let mut lock = self.locked.try_lock()?;
+            if *lock {
+                return Err(Error::TransactionInProgress);
+            }
+            *lock = true;
+        }
+        Ok(Transaction { txn: self })
+    }
+}
+
+impl super::Transaction<&mut InMemoryEventStore> {
+    pub async fn commit(self) -> Result<()> {
+        let mut lock = self.txn.locked.lock().await;
+        if !*lock {
+            panic!("Transaction already committed or rolled back");
+        }
+        *lock = false;
+        Ok(())
+    }
+
+    pub async fn rollback(self) -> Result<()> {
+        let mut lock = self.txn.locked.lock().await;
+        if !*lock {
+            panic!("Transaction already committed or rolled back");
+        }
+        *lock = false;
+        Ok(())
+    }
 }
 
 impl Clone for InMemoryEventStore {
@@ -56,6 +89,7 @@ impl Clone for InMemoryEventStore {
             _rx: None,
             #[cfg(test)]
             version_conflicts: AtomicUsize::new(0),
+            locked: self.locked.clone(),
         }
     }
 }
@@ -71,6 +105,7 @@ impl Default for InMemoryEventStore {
             _rx: Some(_rx),
             #[cfg(test)]
             version_conflicts: AtomicUsize::new(0),
+            locked: Arc::new(Mutex::new(false)),
         }
     }
 }

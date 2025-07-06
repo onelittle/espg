@@ -18,6 +18,7 @@ pub use postgres::PostgresEventStore;
 use serde::{Serialize, de::DeserializeOwned};
 #[cfg(feature = "streaming")]
 pub use streaming::{StreamItem, StreamingEventStore};
+use tokio::sync::TryLockError;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -41,6 +42,10 @@ pub enum Error {
     StreamingError(#[from] streaming::StreamItemError),
     #[error("txid parsing error: {0}")]
     TxIdParsingError(#[from] std::num::ParseIntError),
+    #[error("Lock error: {0}")]
+    LockError(#[from] TryLockError),
+    #[error("Transaction in progress")]
+    TransactionInProgress,
 }
 
 impl PartialEq for Error {
