@@ -1,10 +1,9 @@
-use std::marker::PhantomData;
+use std::{fmt::Debug, marker::PhantomData};
 
 #[cfg(feature = "rocket")]
 use rocket::request::FromParam;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
 pub struct Id<T>(pub String, PhantomData<T>);
 
 impl<T> PartialEq for Id<T> {
@@ -18,6 +17,12 @@ impl<T> Eq for Id<T> {}
 impl<T> std::hash::Hash for Id<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.hash(state);
+    }
+}
+
+impl<T> Debug for Id<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 
