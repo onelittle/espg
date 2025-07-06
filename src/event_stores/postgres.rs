@@ -13,6 +13,9 @@ use futures::Stream;
 #[cfg(feature = "streaming")]
 use futures_channel::mpsc;
 use serde_json::Value;
+#[cfg(feature = "streaming")]
+use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
 use tokio_postgres::{GenericClient, types::Json};
 
 pub struct PostgresEventStore<'a, Db> {
@@ -371,7 +374,10 @@ impl PostgresEventStream {
             tokio_postgres::Socket,
             tokio_postgres::tls::NoTlsStream,
         >,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<StreamItem<T::Event>> {
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<StreamItem<T::Event>>,
+        JoinHandle<()>,
+    ) {
         use std::collections::HashMap;
 
         use futures::FutureExt;
@@ -441,7 +447,7 @@ impl PostgresEventStream {
             .await
             .expect("Failed to listen for notifications");
 
-        tokio::task::spawn(async move {
+        let handle = tokio::task::spawn(async move {
             use futures::stream::StreamExt;
             loop {
                 match rx.next().await {
@@ -513,7 +519,26 @@ impl PostgresEventStream {
             }
         });
 
-        rx2
+        (rx2, handle)
+    }
+}
+
+/// A wrapper for a task handle that aborts the task when dropped.
+struct TaskDropGuard {
+    handle: AbortHandle,
+}
+
+impl TaskDropGuard {
+    pub fn new<T>(handle: JoinHandle<T>) -> Self {
+        TaskDropGuard {
+            handle: handle.abort_handle(),
+        }
+    }
+}
+
+impl Drop for TaskDropGuard {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
@@ -521,8 +546,8 @@ impl PostgresEventStream {
 impl StreamingEventStore for PostgresEventStream {
     async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = StreamItem<X::Event>>> {
         let client = self.client;
-        let rx2 = PostgresEventStream::listen::<X>(client, self.connection).await;
-        Ok(EventStream::new(rx2, ()))
+        let (rx2, handle) = PostgresEventStream::listen::<X>(client, self.connection).await;
+        Ok(EventStream::new(rx2, TaskDropGuard::new(handle)))
     }
 }
 
