@@ -339,13 +339,10 @@ impl<T: GenericClientStore + Sync> EventStore for T {
     }
 }
 
-impl<'a> PostgresEventStore<'a, tokio_postgres::Client> {
-    pub async fn transaction<'b>(
+impl PostgresEventStore<'_, tokio_postgres::Client> {
+    pub async fn transaction<'a>(
         &'a mut self,
-    ) -> Result<super::Transaction<tokio_postgres::Transaction<'b>>>
-    where
-        'a: 'b,
-    {
+    ) -> Result<super::Transaction<tokio_postgres::Transaction<'a>>> {
         let txn = self.client.transaction().await?;
         Ok(super::Transaction::new(txn))
     }
