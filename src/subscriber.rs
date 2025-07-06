@@ -113,6 +113,7 @@ pub trait Subscriber<T: Aggregate + 'static> {
                         subscriber.tick().await;
 
                         let last_seq_string: String = row.get(0);
+                        #[allow(clippy::expect_used)]
                         let last_seq: Txid = last_seq_string.try_into().expect("Failed to parse last_seq");
                         let Some(commit_last_seq) = commit.global_seq else {
                             eprintln!("Commit without global sequence, skipping");

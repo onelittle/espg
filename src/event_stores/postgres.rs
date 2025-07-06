@@ -404,6 +404,7 @@ impl PostgresEventStream {
                 let version: i32 = row.get(1);
                 let action: Json<T::Event> = row.get(2);
                 let global_seq: String = row.get(3);
+                #[allow(clippy::expect_used)]
                 let global_seq = global_seq.try_into().expect("Failed to parse global_seq");
 
                 // Create a Commit from the row data
@@ -475,6 +476,7 @@ impl PostgresEventStream {
                             let version: i32 = row.get(1);
                             let action: Json<T::Event> = row.get(2);
                             let global_seq: String = row.get(3);
+                            #[allow(clippy::expect_used)]
                             let global_seq =
                                 global_seq.try_into().expect("Failed to parse global_seq");
 
