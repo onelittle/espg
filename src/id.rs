@@ -77,6 +77,12 @@ impl<T> std::fmt::Display for Id<T> {
     }
 }
 
+impl<T> From<Id<T>> for String {
+    fn from(id: Id<T>) -> Self {
+        id.0
+    }
+}
+
 #[cfg(feature = "rocket")]
 impl<T> FromParam<'_> for Id<T> {
     type Error = String;
