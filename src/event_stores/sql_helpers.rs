@@ -1,5 +1,4 @@
 pub const CREATE_EVENTS: &str = r#"
-    DROP TABLE IF EXISTS events;
     CREATE TABLE IF NOT EXISTS events (
         aggregate_id TEXT NOT NULL,
         aggregate_type TEXT NOT NULL,
@@ -22,7 +21,6 @@ pub const CREATE_SNAPSHOTS: &str = r#"
 "#;
 
 pub const CREATE_SUBSCRIPTIONS: &str = r#"
-    DROP TABLE IF EXISTS subscriptions;
     CREATE TABLE IF NOT EXISTS subscriptions (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
