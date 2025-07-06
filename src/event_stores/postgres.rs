@@ -13,8 +13,6 @@ use futures::Stream;
 #[cfg(feature = "streaming")]
 use futures_channel::mpsc;
 use serde_json::Value;
-#[cfg(feature = "streaming")]
-use tokio::task::AbortHandle;
 use tokio::task::JoinHandle;
 use tokio_postgres::{GenericClient, types::Json};
 
@@ -523,28 +521,11 @@ impl PostgresEventStream {
     }
 }
 
-/// A wrapper for a task handle that aborts the task when dropped.
-struct TaskDropGuard {
-    handle: AbortHandle,
-}
-
-impl TaskDropGuard {
-    pub fn new<T>(handle: JoinHandle<T>) -> Self {
-        TaskDropGuard {
-            handle: handle.abort_handle(),
-        }
-    }
-}
-
-impl Drop for TaskDropGuard {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
-}
-
 #[cfg(feature = "streaming")]
 impl StreamingEventStore for PostgresEventStream {
     async fn stream<X: Aggregate>(self) -> Result<impl Stream<Item = StreamItem<X::Event>>> {
+        use crate::util::TaskDropGuard;
+
         let client = self.client;
         let (rx2, handle) = PostgresEventStream::listen::<X>(client, self.connection).await;
         Ok(EventStream::new(rx2, TaskDropGuard::new(handle)))
