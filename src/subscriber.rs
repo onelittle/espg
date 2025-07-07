@@ -43,7 +43,6 @@ pub trait Subscriber<T: Aggregate + 'static> {
         async {}
     }
 
-    #[cfg(feature = "postgres")]
     #[allow(async_fn_in_trait)]
     async fn start_postgres(self, config: tokio_postgres::Config) -> crate::Result<Subscription>
     where
@@ -244,7 +243,6 @@ pub trait Subscriber<T: Aggregate + 'static> {
 }
 
 #[cfg(test)]
-#[cfg(feature = "postgres")]
 #[cfg(feature = "inmem")]
 #[allow(clippy::expect_used)]
 #[allow(clippy::unwrap_used)]
@@ -283,7 +281,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "postgres")]
     async fn test_subscriber() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
         let client = test_db.client().await;
@@ -314,7 +311,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "postgres")]
     async fn test_subscriber_concurrency() -> Result<()> {
         let test_db = crate::test_helper::get_test_database().await;
         let mut client = test_db.client().await;

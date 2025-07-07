@@ -11,7 +11,6 @@ use crate::{Aggregate, Commit, Id};
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum StreamItemError {
-    #[cfg(feature = "postgres")]
     #[error("Tokio Postgres error: {0}")]
     TokioPgError(#[from] tokio_postgres::Error),
 }

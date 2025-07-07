@@ -1,6 +1,5 @@
 {
   "rust-analyzer.cargo.features": [
-    "postgres",
     "streaming",
     "inmem",
     "rocket",

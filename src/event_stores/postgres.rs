@@ -13,6 +13,7 @@ use futures::Stream;
 #[cfg(feature = "streaming")]
 use futures_channel::mpsc;
 use serde_json::Value;
+#[cfg(feature = "streaming")]
 use tokio::task::JoinHandle;
 use tokio_postgres::{GenericClient, types::Json};
 

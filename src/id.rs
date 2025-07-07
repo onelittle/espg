@@ -1,10 +1,8 @@
 use std::{fmt::Debug, marker::PhantomData};
 
-#[cfg(feature = "rocket")]
-use rocket::request::FromParam;
 use serde::{Deserialize, Serialize};
 
-pub struct Id<T>(pub String, PhantomData<T>);
+pub struct Id<T>(pub String, pub(crate) PhantomData<T>);
 
 impl<T> PartialEq for Id<T> {
     fn eq(&self, other: &Self) -> bool {
@@ -49,22 +47,6 @@ pub fn id<T>(id: impl Into<String>) -> Id<T> {
     Id(id.into(), PhantomData)
 }
 
-#[cfg(feature = "async-graphql")]
-#[async_graphql::Scalar]
-impl<T: Send + Sync> async_graphql::ScalarType for Id<T> {
-    fn parse(value: async_graphql::Value) -> async_graphql::InputValueResult<Self> {
-        if let async_graphql::Value::String(s) = &value {
-            Ok(Id(s.clone(), PhantomData))
-        } else {
-            Err(async_graphql::InputValueError::expected_type(value))
-        }
-    }
-
-    fn to_value(&self) -> async_graphql::Value {
-        async_graphql::Value::String(self.0.clone())
-    }
-}
-
 impl<T> Clone for Id<T> {
     fn clone(&self) -> Self {
         Id(self.0.clone(), PhantomData)
@@ -80,15 +62,6 @@ impl<T> std::fmt::Display for Id<T> {
 impl<T> From<Id<T>> for String {
     fn from(id: Id<T>) -> Self {
         id.0
-    }
-}
-
-#[cfg(feature = "rocket")]
-impl<T> FromParam<'_> for Id<T> {
-    type Error = String;
-
-    fn from_param(param: &str) -> Result<Self, Self::Error> {
-        Ok(Id(param.to_string(), PhantomData))
     }
 }
 

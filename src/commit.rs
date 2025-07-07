@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::util::Txid;
+use crate::{Aggregate, Id, util::Txid};
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub(crate) struct Diagnostics {
@@ -8,7 +8,7 @@ pub(crate) struct Diagnostics {
     pub snapshotted: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Default, Clone, Serialize, Deserialize, Debug)]
 pub struct Commit<T> {
     pub id: String,
     pub version: usize,
@@ -35,6 +35,16 @@ impl<T> Commit<T> {
         self.inner
     }
 
+    pub fn with_id(self, id: Id<T>) -> Self {
+        Commit {
+            id: id.into(),
+            version: self.version,
+            inner: self.inner,
+            diagnostics: self.diagnostics,
+            global_seq: self.global_seq,
+        }
+    }
+
     pub fn with_inner<U>(self, inner: U) -> Commit<U> {
         Commit {
             id: self.id,
@@ -46,25 +56,10 @@ impl<T> Commit<T> {
     }
 }
 
-#[cfg(feature = "async-graphql")]
-#[async_graphql::Object]
-impl<T: async_graphql::OutputType> Commit<T> {
-    async fn id(&self) -> String {
-        self.id.clone()
-    }
-
-    async fn version(&self) -> usize {
-        self.version
-    }
-
-    async fn inner(&self) -> &T {
-        &self.inner
-    }
-}
-
-#[cfg(feature = "async-graphql")]
-impl<T: async_graphql::OutputType> async_graphql::TypeName for Commit<T> {
-    fn type_name() -> std::borrow::Cow<'static, str> {
-        format!("{}Commit", <T as async_graphql::OutputType>::type_name()).into()
+impl<T: Aggregate> Commit<T> {
+    pub fn reduce(&mut self, other: Commit<T::Event>) {
+        let aggregate = std::mem::take(&mut self.inner);
+        self.inner = aggregate.reduce(&other.inner);
+        self.version = other.version;
     }
 }

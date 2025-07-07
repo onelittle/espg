@@ -1,9 +1,12 @@
 mod aggregate;
+#[cfg(feature = "async-graphql")]
+mod async_graphql;
 mod commit;
 mod event_stores;
 mod id;
+#[cfg(feature = "rocket")]
+mod rocket;
 #[cfg(feature = "streaming")]
-#[cfg(feature = "postgres")]
 mod subscriber;
 mod util;
 
@@ -11,7 +14,6 @@ pub use aggregate::Aggregate;
 pub use commit::Commit;
 #[cfg(feature = "inmem")]
 pub use event_stores::InMemoryEventStore;
-#[cfg(feature = "postgres")]
 pub use event_stores::PostgresEventStore;
 pub use event_stores::{Error, EventStore, Result, retry_on_version_conflict};
 pub use id::{Id, id};
@@ -20,11 +22,9 @@ pub use id::{Id, id};
 pub use event_stores::{StreamItem, StreamingEventStore};
 
 #[cfg(feature = "streaming")]
-#[cfg(feature = "postgres")]
 pub use event_stores::postgres::PostgresEventStream;
 
 #[cfg(feature = "streaming")]
-#[cfg(feature = "postgres")]
 pub use subscriber::{Subscriber, Subscription};
 
 #[cfg(test)]
@@ -34,6 +34,7 @@ mod tests {
     use super::Aggregate;
 
     #[derive(Default, Serialize, Deserialize)]
+    #[cfg_attr(feature = "async-graphql", derive(async_graphql::SimpleObject))]
     pub struct State {
         pub value: i32,
     }
@@ -128,7 +129,6 @@ mod tests {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 #[allow(clippy::unwrap_used)]
-#[cfg(feature = "postgres")]
 mod test_helper {
     use std::sync::atomic::AtomicBool;
     use tokio::io::AsyncReadExt;

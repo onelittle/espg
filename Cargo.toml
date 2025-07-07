@@ -9,10 +9,10 @@ futures-channel = "0.3.31"
 futures-util = "0.3.31"
 indexmap = { version = "2.9.0", features = ["serde"], optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = { version = "1.0.140", optional = true }
+serde_json = { version = "1.0.140" }
 thiserror = "2.0.12"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "net"] }
-tokio-postgres = { version = "0.7.13", features = ["with-serde_json-1"], optional = true}
+tokio-postgres = { version = "0.7.13", features = ["with-serde_json-1"]}
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 tokio-util = "0.7.15"
 uuid = { version = "1.17.0", features = ["v4"] }
@@ -29,11 +29,10 @@ deadpool-postgres = "0.14.1"
 pgtemp = "0.6.0"
 
 [features]
-postgres = ["dep:tokio-postgres", "dep:serde_json"]
-inmem = ["dep:indexmap", "dep:serde_json"]
+inmem = ["dep:indexmap"]
 streaming = []
 rocket = ["dep:rocket"]
-async-graphql = ["dep:async-graphql"]
+async-graphql = ["dep:async-graphql", "dep:indexmap"]
 
 [lints.clippy]
 expect_used = "warn"

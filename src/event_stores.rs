@@ -1,8 +1,6 @@
 #[cfg(feature = "inmem")]
 mod in_memory;
-#[cfg(feature = "postgres")]
 pub mod postgres;
-#[cfg(feature = "postgres")]
 pub(crate) mod sql_helpers;
 #[cfg(feature = "streaming")]
 mod streaming;
@@ -13,7 +11,6 @@ use crate::{Aggregate, Commit, Id, util::Loadable};
 use async_trait::async_trait;
 #[cfg(feature = "inmem")]
 pub use in_memory::InMemoryEventStore;
-#[cfg(feature = "postgres")]
 pub use postgres::PostgresEventStore;
 use serde::{Serialize, de::DeserializeOwned};
 #[cfg(feature = "streaming")]
@@ -30,11 +27,9 @@ pub enum Error {
     /// Optimistic locking failed due to a version conflict.
     VersionConflict(usize),
     #[error("tokio_postgres error: {0}")]
-    #[cfg(feature = "postgres")]
     /// Only available when the `postgres` feature is enabled.
     TokioPgError(#[from] tokio_postgres::Error),
     #[error("serde_json error: {0}")]
-    #[cfg(feature = "postgres")]
     /// Only available when the `postgres` feature is enabled.
     SerdeJsonError(#[from] serde_json::Error),
     #[cfg(feature = "streaming")]
