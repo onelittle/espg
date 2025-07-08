@@ -1,5 +1,4 @@
 use std::sync::atomic::AtomicI64;
-#[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::{any::Any, sync::Arc};
 
@@ -54,7 +53,11 @@ impl InMemoryEventStore {
             }
             *lock = true;
         }
-        Ok(Transaction { txn: self })
+        Ok(Transaction {
+            txn: self,
+            query_count: AtomicUsize::new(0),
+            write_count: AtomicUsize::new(0),
+        })
     }
 }
 

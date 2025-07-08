@@ -5,7 +5,7 @@ pub(crate) mod sql_helpers;
 #[cfg(feature = "streaming")]
 mod streaming;
 
-use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 
 use crate::{Aggregate, Commit, Id, util::Loadable};
 use async_trait::async_trait;
@@ -112,14 +112,10 @@ pub trait EventStore: Sync {
             Err(_) => None,
         }
     }
-    async fn get_commits<X: Aggregate>(&self, ids: &[Id<X>]) -> Result<HashMap<Id<X>, Commit<X>>> {
-        let mut commits = HashMap::new();
+    async fn get_commits<X: Aggregate>(&self, ids: &[&Id<X>]) -> Result<Vec<Commit<X>>> {
+        let mut commits = vec![];
         for id in ids {
-            let commit = self
-                .get_commit(id)
-                .await
-                .ok_or(Error::NotFound(id.to_string()))?;
-            commits.insert(id.clone(), commit);
+            commits.push(self.try_get_commit(id).await?)
         }
         Ok(commits)
     }
@@ -146,7 +142,6 @@ pub trait EventStore: Sync {
     /// - [`Id<Aggregate>`](crate::Id) can be used to load a single aggregate
     /// - [`Vec<Id<Aggregate>>`](std::vec::Vec) can be used to load multiple aggregates
     /// - [`HashMap<K, V = Id<Aggregate>>`](std::collections::HashMap) can be used to load multiple aggregates as a hash
-    #[allow(private_bounds)]
     fn load<L: Loadable>(&self, value: L) -> impl Future<Output = Result<L::Output>>
     where
         Self: Sized,
@@ -157,6 +152,8 @@ pub trait EventStore: Sync {
 
 pub struct Transaction<T> {
     pub(crate) txn: T,
+    pub(crate) query_count: AtomicUsize,
+    pub(crate) write_count: AtomicUsize,
 }
 
 pub async fn retry_on_version_conflict<F, Fut, R>(mut f: F) -> Result<R>

@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicUsize;
+
 use super::{Error, Result};
 #[cfg(feature = "streaming")]
 use crate::event_stores::streaming::{EventStream, StreamItem, StreamingEventStore};
@@ -19,6 +21,8 @@ use tokio_postgres::{GenericClient, types::Json};
 
 pub struct PostgresEventStore<'a, Db> {
     pub(crate) client: &'a mut Db,
+    pub(crate) read_count: AtomicUsize,
+    pub(crate) write_count: AtomicUsize,
 }
 
 impl<Db> PostgresEventStore<'_, Db>
@@ -26,7 +30,11 @@ where
     Db: GenericClient,
 {
     pub fn new<'a>(client: &'a mut Db) -> PostgresEventStore<'a, Db> {
-        PostgresEventStore { client }
+        PostgresEventStore {
+            client,
+            read_count: AtomicUsize::new(0),
+            write_count: AtomicUsize::new(0),
+        }
     }
 
     #[allow(clippy::expect_used)]
@@ -110,7 +118,11 @@ impl<'a> PostgresEventStore<'a, tokio_postgres::Client> {
 
 impl<'a> super::Transaction<tokio_postgres::Transaction<'a>> {
     pub fn new(txn: tokio_postgres::Transaction<'a>) -> Self {
-        Self { txn }
+        Self {
+            txn,
+            query_count: AtomicUsize::new(0),
+            write_count: AtomicUsize::new(0),
+        }
     }
 
     pub async fn commit(self) -> Result<()> {
@@ -128,13 +140,26 @@ impl<'a> super::Transaction<tokio_postgres::Transaction<'a>> {
     }
 }
 
+#[async_trait]
 trait GenericClientStore {
     fn get_client(&self) -> &impl GenericClient;
+    fn count_read(&self);
+    fn count_write(&self);
 }
 
 impl GenericClientStore for PostgresEventStore<'_, tokio_postgres::Client> {
     fn get_client(&self) -> &impl GenericClient {
         self.client
+    }
+
+    fn count_read(&self) {
+        self.read_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn count_write(&self) {
+        self.write_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -142,11 +167,31 @@ impl GenericClientStore for PostgresEventStore<'_, tokio_postgres::Transaction<'
     fn get_client(&self) -> &impl GenericClient {
         self.client
     }
+
+    fn count_read(&self) {
+        self.read_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn count_write(&self) {
+        self.write_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl GenericClientStore for Transaction<tokio_postgres::Transaction<'_>> {
     fn get_client(&self) -> &impl GenericClient {
         &self.txn
+    }
+
+    fn count_read(&self) {
+        self.query_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn count_write(&self) {
+        self.write_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -163,10 +208,11 @@ impl<T: GenericClientStore + Sync> EventStore for T {
         let rows = self
             .get_client()
             .query(
-                "SELECT version, action, global_seq::text FROM events WHERE aggregate_id = $1 AND aggregate_type = $2 AND version BETWEEN $3 AND $4 ORDER BY version",
-                &[&id.0, &X::NAME, &min_version, &max_version],
+                "SELECT version, action, global_seq::text FROM events WHERE aggregate_id = ANY($1) AND aggregate_type = $2 AND version BETWEEN $3 AND $4 ORDER BY version",
+                &[&vec![&id.0], &X::NAME, &min_version, &max_version],
             )
             .await?;
+        self.count_read();
 
         let (version, global_seq) = rows
             .last()
@@ -176,7 +222,7 @@ impl<T: GenericClientStore + Sync> EventStore for T {
                 let global_seq: Txid = global_seq.try_into()?;
                 Result::Ok((version as usize, Some(global_seq)))
             })
-            .unwrap_or(Ok(((min_version - 1) as usize, None)))?;
+            .unwrap_or(Result::Ok(((min_version - 1) as usize, None)))?;
 
         if version == 0 {
             return Err(Error::NotFound("No events found".to_string()));
@@ -230,6 +276,69 @@ impl<T: GenericClientStore + Sync> EventStore for T {
         }
     }
 
+    async fn get_commits<X: Aggregate>(&self, ids: &[&Id<X>]) -> Result<Vec<Commit<X>>> {
+        use itertools::Itertools;
+
+        let sql_ids = ids.iter().map(|id| &id.0).collect::<Vec<_>>();
+        let rows = self
+            .get_client()
+            .query(
+                "SELECT aggregate_id, version, action, global_seq::text FROM events WHERE aggregate_id = ANY($1) AND aggregate_type = $2 ORDER BY aggregate_id, version",
+                &[&sql_ids, &X::NAME],
+            )
+            .await?;
+        self.count_read();
+
+        let keyed: Vec<(String, (i32, Value, Txid))> = rows
+            .iter()
+            .map(|row| {
+                let id = row.get::<_, String>(0);
+                let version: i32 = row.get(1);
+                let action: Value = row.get(2);
+                let global_seq: String = row.get(3);
+                let global_seq: Txid = global_seq.try_into()?;
+                Result::Ok((id, (version, action, global_seq)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut grouped = keyed.into_iter().into_group_map();
+        let mut commits = vec![];
+        for id in ids {
+            let rows = grouped
+                .remove(&id.0)
+                .ok_or_else(|| Error::NotFound(format!("No events found for aggregate {}", id)))?;
+            #[allow(clippy::unwrap_used)]
+            let (version, global_seq) = rows
+                .last()
+                .map(|row| {
+                    let version: i32 = row.0;
+                    let global_seq: Txid = row.2;
+                    (version as usize, Some(global_seq))
+                })
+                .unwrap();
+
+            if version == 0 {
+                return Err(Error::NotFound("No events found".to_string()));
+            }
+
+            let mut events: Vec<X::Event> = Vec::with_capacity(rows.len());
+            for row in rows {
+                let action: Value = row.1;
+                events.push(serde_json::from_value(action)?);
+            }
+
+            commits.push(super::Commit {
+                id: id.to_string(),
+                version,
+                diagnostics: None,
+                inner: X::from_slice(&events),
+                global_seq,
+            })
+        }
+
+        Ok(commits)
+    }
+
     async fn commit<X: Aggregate>(
         &self,
         id: &Id<X>,
@@ -237,8 +346,7 @@ impl<T: GenericClientStore + Sync> EventStore for T {
         action: X::Event,
     ) -> Result<()> {
         let json_action: Value = serde_json::to_value(action.clone())?;
-        self.get_client()
-            .execute(
+        self.get_client().execute(
                 "INSERT INTO events (aggregate_id, aggregate_type, version, action) VALUES ($1, $2, $3, $4)",
                 &[&id.0, &X::NAME, &(version as i32), &json_action],
             )
@@ -250,6 +358,7 @@ impl<T: GenericClientStore + Sync> EventStore for T {
                     panic!("Failed to insert event: {}", e)
                 }
             })?;
+        self.count_read();
 
         if version % X::SNAPSHOT_INTERVAL == 0 {
             self.store_snapshot::<X>(id).await?;
@@ -280,6 +389,7 @@ impl<T: GenericClientStore + Sync> EventStore for T {
                 &[&id.0, &X::NAME, &key, &(version as i32), &snapshot],
             )
             .await?;
+        self.count_write();
         Ok(())
     }
 
@@ -925,6 +1035,42 @@ mod tests {
             5,
             "Expected final value to be 5"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_commits() -> Result<()> {
+        let test_db = crate::test_helper::get_test_database().await;
+        let mut client = test_db.client().await;
+        let event_store = event_store(&mut client)
+            .await
+            .expect("msg: Failed to create event store");
+        let ids = (0..10)
+            .map(|i| State::id(format!("test{}", i)))
+            .collect::<Vec<_>>();
+        for id in &ids {
+            event_store.append(id, Event::Increment(1)).await?;
+        }
+
+        event_store
+            .read_count
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let commits = event_store.load(ids.clone()).await?;
+        assert_eq!(commits.len(), 10, "Expected 10 commits");
+        assert_eq!(
+            event_store
+                .read_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Expected 1 query to load all commits"
+        );
+        for (i, commit) in commits.iter().enumerate() {
+            assert_eq!(commit.id, ids[i].to_string(), "Commit ID mismatch");
+            assert_eq!(commit.version, 1, "Expected version 1 for all commits");
+            assert_eq!(commit.inner.value, 1, "Expected value to be 1");
+        }
 
         Ok(())
     }

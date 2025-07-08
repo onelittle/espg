@@ -3,6 +3,6 @@
     "streaming",
     "inmem",
     "rocket",
-    "async-graphql",
+    "async-graphql"
   ]
 }
