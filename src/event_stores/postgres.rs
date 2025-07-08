@@ -647,6 +647,8 @@ impl StreamingEventStore for PostgresEventStream {
 #[allow(clippy::expect_used)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::collections::HashMap;
+
     #[cfg(feature = "streaming")]
     use tokio_stream::StreamExt;
 
@@ -1066,6 +1068,43 @@ mod tests {
             1,
             "Expected 1 query to load all commits"
         );
+        for (i, commit) in commits.iter().enumerate() {
+            assert_eq!(commit.id, ids[i].to_string(), "Commit ID mismatch");
+            assert_eq!(commit.version, 1, "Expected version 1 for all commits");
+            assert_eq!(commit.inner.value, 1, "Expected value to be 1");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_commits_from_hash_with_vec() -> Result<()> {
+        let test_db = crate::test_helper::get_test_database().await;
+        let mut client = test_db.client().await;
+        let event_store = event_store(&mut client)
+            .await
+            .expect("msg: Failed to create event store");
+        let ids = (0..10)
+            .map(|i| State::id(format!("test{}", i)))
+            .collect::<Vec<_>>();
+        for id in &ids {
+            event_store.append(id, Event::Increment(1)).await?;
+        }
+
+        let mut query = HashMap::new();
+        let ids = vec![&ids[0], &ids[1], &ids[2]]
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        query.insert("ids", ids.clone());
+        let results = event_store.load(ids.clone()).await?;
+        assert_eq!(results.len(), 3, "Expected 3 commits");
+
+        let results = event_store.load(query).await?;
+
+        assert_eq!(results.len(), 1, "Expected 1 entry");
+        let commits = results.get("ids").expect("Expected 'ids' key");
+        assert_eq!(commits.len(), 3, "Expected 3 commits for 'ids'");
         for (i, commit) in commits.iter().enumerate() {
             assert_eq!(commit.id, ids[i].to_string(), "Commit ID mismatch");
             assert_eq!(commit.version, 1, "Expected version 1 for all commits");

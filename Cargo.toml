@@ -45,11 +45,11 @@ required-features = ["inmem"]
 
 [[example]]
 name = "benchmark_pg"
-required-features = ["postgres"]
+required-features = []
 
 [[example]]
 name = "bank_account_pg"
-required-features = ["postgres", "streaming"]
+required-features = ["streaming"]
 
 [[example]]
 name = "bank_account"

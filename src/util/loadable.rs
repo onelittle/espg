@@ -55,6 +55,36 @@ impl<K: std::cmp::Eq + std::hash::Hash, X: Aggregate> Loadable for HashMap<K, Id
     }
 }
 
+impl<K: std::cmp::Eq + std::hash::Hash, X: Aggregate> Loadable for HashMap<K, Vec<Id<X>>> {
+    type Output = HashMap<K, Vec<Commit<X>>>;
+
+    async fn load(self, store: &impl EventStore) -> Result<Self::Output> {
+        let as_array: Vec<(K, Vec<Id<X>>)> = self.into_iter().collect();
+        let mut ids: Vec<Id<X>> = as_array.iter().fold(vec![], |mut vec, (_, ids)| {
+            vec.extend_from_slice(&ids.to_vec());
+            vec
+        });
+        let mut commits = ids.clone().load(store).await?;
+        let mut results = HashMap::new();
+        for (k, v) in as_array.into_iter() {
+            let mut commit_vec = vec![];
+            for id in &v {
+                let idx = ids
+                    .iter()
+                    .position(|v| v == id)
+                    .ok_or(Error::NotFound(format!("Commit not found for ID: {}", id)))?;
+                // Remove the ID at idx from ids to avoid duplicates
+                eprintln!("Removing ID at index {}: {:?}", idx, ids[idx]);
+                ids.remove(idx);
+                let commit = commits.remove(idx);
+                commit_vec.push(commit);
+            }
+            results.insert(k, commit_vec);
+        }
+        Ok(results)
+    }
+}
+
 impl<K: std::cmp::Eq + std::hash::Hash, X: Aggregate> Loadable for indexmap::IndexMap<K, Id<X>> {
     type Output = indexmap::IndexMap<K, Commit<X>>;
 
