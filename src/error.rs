@@ -12,6 +12,8 @@ pub enum Error {
     #[error("Version conflict: {0}")]
     /// Optimistic locking failed due to a version conflict.
     VersionConflict(usize),
+    #[error("Transaction in progress")]
+    TransactionInProgress,
     #[error("tokio_postgres error: {0}")]
     TokioPgError(#[from] tokio_postgres::Error),
     #[error("serde_json error: {0}")]
@@ -23,8 +25,6 @@ pub enum Error {
     TxIdParsingError(#[from] std::num::ParseIntError),
     #[error("Lock error: {0}")]
     LockError(#[from] TryLockError),
-    #[error("Transaction in progress")]
-    TransactionInProgress,
 }
 
 impl PartialEq for Error {
