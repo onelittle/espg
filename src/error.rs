@@ -13,10 +13,8 @@ pub enum Error {
     /// Optimistic locking failed due to a version conflict.
     VersionConflict(usize),
     #[error("tokio_postgres error: {0}")]
-    /// Only available when the `postgres` feature is enabled.
     TokioPgError(#[from] tokio_postgres::Error),
     #[error("serde_json error: {0}")]
-    /// Only available when the `postgres` feature is enabled.
     SerdeJsonError(#[from] serde_json::Error),
     #[cfg(feature = "streaming")]
     #[error("streaming error: {0}")]
