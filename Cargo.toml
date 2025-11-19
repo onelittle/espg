@@ -2,6 +2,8 @@
 name = "espg"
 version = "0.1.0"
 edition = "2024"
+description = "An event sourcing library for Rust with PostgreSQL support"
+license = "MIT"
 exclude = [
   "Tiltfile",
   ".vscode/**"
