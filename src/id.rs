@@ -20,7 +20,7 @@ impl<T> std::hash::Hash for Id<T> {
 
 impl<T> Debug for Id<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        write!(f, "ID<{}>({})", std::any::type_name::<T>(), self.0)
     }
 }
 
@@ -55,7 +55,7 @@ impl<T> Clone for Id<T> {
 
 impl<T> std::fmt::Display for Id<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -74,5 +74,11 @@ mod tests {
     fn test_id_display() {
         let id: Id<State> = id("test_id");
         assert_eq!(id.to_string(), "test_id");
+    }
+
+    #[test]
+    fn test_id_debug() {
+        let id: Id<State> = id("debug_id");
+        assert_eq!(format!("{:?}", id), "ID<espg::tests::State>(debug_id)");
     }
 }
