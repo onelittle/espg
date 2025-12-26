@@ -360,7 +360,7 @@ impl<T: GenericClientStore + Sync> EventStore for T {
             })?;
         self.count_read();
 
-        if version % X::SNAPSHOT_INTERVAL == 0 {
+        if version.is_multiple_of(X::SNAPSHOT_INTERVAL) {
             self.store_snapshot::<X>(id).await?;
         }
 
