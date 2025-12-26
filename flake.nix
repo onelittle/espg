@@ -19,6 +19,7 @@
           buildInputs = with pkgs; [
             cargo
             rustc
+            clippy
           ];
 
           packages = [
