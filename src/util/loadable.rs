@@ -12,8 +12,16 @@ impl<X: Aggregate + Default> Loadable for Id<X> {
     type Output = X;
 
     async fn load(self, store: &impl EventStore) -> Result<Self::Output> {
+        <&Id<X> as Loadable>::load(&self, store).await
+    }
+}
+
+impl<X: Aggregate + Default> Loadable for &Id<X> {
+    type Output = X;
+
+    async fn load(self, store: &impl EventStore) -> Result<Self::Output> {
         store
-            .get_commit(&self)
+            .get_commit(self)
             .await
             .map(|commit| commit.inner)
             .ok_or_else(|| Error::NotFound(self.to_string()))
