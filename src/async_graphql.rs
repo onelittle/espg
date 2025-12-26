@@ -1,9 +1,9 @@
 use async_graphql::{OutputType, ScalarType};
 use indexmap::IndexMap;
 
-use crate::{Aggregate, Commit, Id};
+use crate::{Commit, Id};
 
-impl<X: Aggregate> ScalarType for Id<X> {
+impl<X: Send> ScalarType for Id<X> {
     fn parse(value: async_graphql::Value) -> async_graphql::InputValueResult<Id<X>> {
         #[allow(clippy::expect_used)]
         let val: String = async_graphql::from_value(value).expect("Failed to parse Id from value");
@@ -15,7 +15,7 @@ impl<X: Aggregate> ScalarType for Id<X> {
     }
 }
 
-impl<X: Aggregate + OutputType> async_graphql::InputType for Id<X> {
+impl<X: OutputType> async_graphql::InputType for Id<X> {
     type RawValueType = String;
 
     fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
@@ -55,7 +55,7 @@ impl<X: Aggregate + OutputType> async_graphql::InputType for Id<X> {
     }
 }
 
-impl<X: Aggregate + OutputType> async_graphql::OutputType for Id<X> {
+impl<X: OutputType> async_graphql::OutputType for Id<X> {
     fn type_name() -> ::std::borrow::Cow<'static, ::std::primitive::str> {
         format!("{}ID", X::type_name()).into()
     }
