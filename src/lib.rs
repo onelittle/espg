@@ -17,7 +17,7 @@ pub use error::{Error, Result};
 #[cfg(feature = "inmem")]
 pub use event_stores::InMemoryEventStore;
 pub use event_stores::PostgresEventStore;
-pub use event_stores::{EventStore, retry_on_version_conflict};
+pub use event_stores::{EventStore, TransactionalEventStore, retry_on_version_conflict};
 pub use id::{Id, id};
 
 #[cfg(feature = "streaming")]

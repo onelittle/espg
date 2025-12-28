@@ -451,10 +451,13 @@ impl<T: GenericClientStore + Sync> EventStore for T {
     }
 }
 
-impl PostgresEventStore<'_, tokio_postgres::Client> {
-    pub async fn transaction<'a>(
-        &'a mut self,
-    ) -> Result<super::Transaction<tokio_postgres::Transaction<'a>>> {
+impl<'a> super::TransactionalEventStore for PostgresEventStore<'a, tokio_postgres::Client> {
+    type TransactionType<'b>
+        = super::Transaction<tokio_postgres::Transaction<'b>>
+    where
+        'a: 'b;
+
+    async fn transaction<'b>(&'b mut self) -> Result<Self::TransactionType<'b>> {
         let txn = self.client.transaction().await?;
         Ok(super::Transaction::new(txn))
     }
@@ -653,7 +656,10 @@ mod tests {
     use tokio_stream::StreamExt;
 
     use super::*;
-    use crate::tests::{Event, State};
+    use crate::{
+        TransactionalEventStore,
+        tests::{Event, State},
+    };
 
     async fn event_store<'a, 'b>(
         client: &'a mut tokio_postgres::Client,

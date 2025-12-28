@@ -112,6 +112,16 @@ pub trait EventStore: Sync {
     }
 }
 
+pub trait TransactionalEventStore: EventStore {
+    type TransactionType<'a>
+    where
+        Self: 'a;
+
+    fn transaction<'a>(
+        &'a mut self,
+    ) -> impl Future<Output = Result<Self::TransactionType<'a>>> + Send;
+}
+
 pub struct Transaction<T> {
     pub(crate) txn: T,
     pub(crate) query_count: AtomicUsize,

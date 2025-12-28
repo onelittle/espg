@@ -44,8 +44,12 @@ impl InMemoryEventStore {
         let store = self.store.read().await;
         store.is_empty()
     }
+}
 
-    pub async fn transaction(&mut self) -> Result<Transaction<&mut Self>> {
+impl super::TransactionalEventStore for InMemoryEventStore {
+    type TransactionType<'b> = super::Transaction<&'b mut Self>;
+
+    async fn transaction<'b>(&'b mut self) -> Result<Self::TransactionType<'b>> {
         {
             let mut lock = self.locked.try_lock()?;
             if *lock {
