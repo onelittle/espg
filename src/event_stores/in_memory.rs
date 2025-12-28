@@ -62,7 +62,7 @@ impl InMemoryEventStore {
 }
 
 impl super::Transaction<&mut InMemoryEventStore> {
-    pub async fn commit(self) -> Result<()> {
+    pub async fn finish(self) -> Result<()> {
         let mut lock = self.txn.locked.lock().await;
         if !*lock {
             panic!("Transaction already committed or rolled back");

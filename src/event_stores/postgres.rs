@@ -125,7 +125,7 @@ impl<'a> super::Transaction<tokio_postgres::Transaction<'a>> {
         }
     }
 
-    pub async fn commit(self) -> Result<()> {
+    pub async fn finish(self) -> Result<()> {
         self.txn.commit().await.map_err(|e| {
             if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
                 Error::VersionConflict(0)
