@@ -20,6 +20,7 @@
             cargo
             rustc
             clippy
+            rustfmt
           ];
 
           packages = [
