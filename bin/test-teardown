@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+PGM_DATABASE_PREFIX="espg_test" \
+  PGM_DATABASE_COUNT="16" \
+  pgmanager wrap-each -ix -- dropdb
