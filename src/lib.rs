@@ -133,11 +133,10 @@ mod tests {
 #[allow(clippy::unwrap_used)]
 mod test_helper {
     use std::sync::atomic::AtomicBool;
-    use tokio::io::AsyncReadExt;
 
     pub(crate) struct TestDb {
         pub(crate) name: String,
-        _stream: tokio::net::UnixStream,
+        _guard: pgmanager::DatabaseGuard,
         initialized: AtomicBool,
     }
 
@@ -202,40 +201,13 @@ mod test_helper {
     }
 
     pub(crate) async fn get_test_database() -> TestDb {
-        // Connect to socket at cwd/tmp/test_manager.sock
-        let path = std::env::var("PGMANAGER_SOCKET").expect("PGMANAGER_SOCKET must be set");
-        let mut stream = tokio::net::UnixStream::connect(path)
+        let db_guard = pgmanager::get_database()
             .await
-            .expect("Failed to connect to test manager socket");
-        let mut buffer = [0; 1024];
-        let read = stream
-            .read(&mut buffer)
-            .await
-            .expect("Failed to read from test manager socket");
-        if read == 0 {
-            panic!("Test manager socket closed unexpectedly");
+            .expect("Failed to get test database");
+        TestDb {
+            name: db_guard.name.clone(),
+            _guard: db_guard,
+            initialized: AtomicBool::new(false),
         }
-        let response = String::from_utf8_lossy(&buffer);
-        if response.starts_with("OK:") {
-            let db_name = response.strip_prefix("OK:").unwrap().trim().to_string();
-            // Remove embedded null characters
-            let db_name = db_name.replace('\0', "");
-
-            eprintln!("Using test database: {}", db_name);
-            return TestDb {
-                name: db_name.clone(),
-                _stream: stream,
-                initialized: AtomicBool::new(false),
-            };
-        }
-
-        if response.starts_with("EMPTY:") {
-            panic!(
-                "No databases available: {}",
-                response.strip_prefix("ERROR:").unwrap().trim()
-            );
-        }
-
-        panic!("Unexpected response from test manager: {}", response);
     }
 }
