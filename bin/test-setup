@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+PGM_DATABASE_PREFIX="espg_test" \
+  PGM_DATABASE_COUNT="16" \
+  pgmanager init
+
+for i in $(seq 0 15);
+do
+    createdb "espg_test_$i"
+done
