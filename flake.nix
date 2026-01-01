@@ -24,7 +24,7 @@
           ];
 
           packages = [
-            pgmanager.packages.${system}.pgmanager
+            pgmanager.packages.${system}.default
           ];
         };
       }
