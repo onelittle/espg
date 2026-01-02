@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start PostgreSQL
+        run: sudo service postgresql start
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-key: v2
+          components: clippy,rustfmt
+
+      - name: Install pgmanager
+        run: cargo install pgmanager@0.3.1
+
+      - name: Install nextest
+        run: cargo install cargo-nextest@0.9.114
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check code
+        run: cargo check
+
+      - name: Run clippy
+        run: cargo clippy
+
+      - name: Create postgres user
+        run: sudo -u postgres createuser runner --superuser
+
+      - name: Test setup
+        run: bin/test-setup
+
+      - name: Test
+        run: bin/test
+
+      - name: Build
+        run: cargo build

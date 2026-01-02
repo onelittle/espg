@@ -21,6 +21,7 @@
             rustc
             clippy
             rustfmt
+            cargo-nextest
           ];
 
           packages = [
