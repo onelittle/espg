@@ -139,14 +139,20 @@ mod test_helper {
         initialized: AtomicBool,
     }
 
+    const SOCKET_PATH: &str = if cfg!(target_os = "macos") {
+        "/tmp"
+    } else {
+        "/var/run/postgresql"
+    };
+
     impl TestDb {
         pub fn connection_string(&self) -> String {
-            format!("postgres://localhost:5432/{}", self.name)
+            format!("postgres:///{}?host={SOCKET_PATH}", self.name)
         }
 
         pub async fn tokio_postgres_config(&self) -> tokio_postgres::Config {
             let mut config = tokio_postgres::Config::new();
-            config.host("localhost").port(5432).dbname(&self.name);
+            config.dbname(&self.name).host_path(SOCKET_PATH);
             self.initialize(&config)
                 .await
                 .expect("Failed to initialize test database");
