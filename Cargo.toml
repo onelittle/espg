@@ -24,7 +24,7 @@ tokio-util = "0.7.15"
 uuid = { version = "1.17.0", features = ["v4"] }
 mutants = "0.0.3"
 async-trait = "0.1.88"
-dyn-clone = "1.0.19"
+dyn-clone = "1.0.20"
 rocket = { version = "0.5.1", optional = true }
 md-5 = "0.10.6"
 async-graphql = { version = "7.0.19", optional = true }
