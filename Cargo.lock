@@ -1368,9 +1368,9 @@ dependencies = [
 
 [[package]]
 name = "pgmanager"
-version = "0.2.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e15574778ce651dcb4e17eee65c2eebb764b9f092cacdfca2e2e72b2045b8d2"
+checksum = "48fe6c3a520be4037fc7d780fb6fea60b6699a6ea6ab38d8eb1c3236b344593f"
 dependencies = [
  "clap",
  "tokio",

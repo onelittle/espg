@@ -135,8 +135,7 @@ mod test_helper {
     use std::sync::atomic::AtomicBool;
 
     pub(crate) struct TestDb {
-        pub(crate) name: String,
-        _guard: pgmanager::DatabaseGuard,
+        pub(crate) name: pgmanager::DatabaseGuard,
         initialized: AtomicBool,
     }
 
@@ -201,12 +200,9 @@ mod test_helper {
     }
 
     pub(crate) async fn get_test_database() -> TestDb {
-        let db_guard = pgmanager::get_database()
-            .await
-            .expect("Failed to get test database");
+        let name = pgmanager::get_database().await;
         TestDb {
-            name: db_guard.name.clone(),
-            _guard: db_guard,
+            name,
             initialized: AtomicBool::new(false),
         }
     }
