@@ -1,5 +1,4 @@
-use async_graphql::{OutputType, ScalarType};
-use indexmap::IndexMap;
+use async_graphql::{OutputType, ScalarType, indexmap::IndexMap};
 
 use crate::{Commit, Id};
 
@@ -175,7 +174,7 @@ impl<T: async_graphql::OutputType> async_graphql::OutputType for Commit<T> {
         _ctx: &async_graphql::context::ContextSelectionSet<'_>,
         field: &async_graphql::Positioned<async_graphql::parser::types::Field>,
     ) -> async_graphql::ServerResult<async_graphql::Value> {
-        let mut index_map = indexmap::map::IndexMap::new();
+        let mut index_map = IndexMap::new();
         for item in &field.node.selection_set.node.items {
             match item.node {
                 async_graphql::parser::types::Selection::Field(ref field) => {

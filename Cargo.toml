@@ -13,7 +13,7 @@ exclude = [
 futures = "0.3.31"
 futures-channel = "0.3.31"
 futures-util = "0.3.31"
-indexmap = { version = "2.9.0", features = ["serde"] }
+indexmap = { version = "2.9.0", features = ["serde"], optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.148" }
 thiserror = "2.0.12"
@@ -34,7 +34,8 @@ deadpool-postgres = "0.14.1"
 pgmanager = "0.3.1"
 
 [features]
-inmem = []
+inmem = ["indexmap"]
+indexmap = ["dep:indexmap"]
 streaming = []
 rocket = ["dep:rocket"]
 async-graphql = ["dep:async-graphql"]

@@ -14,7 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `uuid` feature flag
 - `espg::Id<T>` supports `From<&str>`, `From<&String>`, `From<String>` and `From<uuid::Uuid>` (behind `uuid` feature flag)
 
-
 ### Changed
 
 - Renamed `espg::Transaction::commit` to `finish` to allow access to `commit` of the underlying `EventStore` object
@@ -22,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `espg::Id<T>` now differs bet ween `Debug` and `Display` where the former will output with format `ID<T>(value)`
 - `pgmanager` was extracted to its own repository
 - `espg::id` function is deprecated in favor of using `Into<espg::Id>`
+- Feature flagged `impl Loadable foor IndexMap` and `indexmap` direct dependency behind `indexmap`
 
 ## [0.1.0] - 2025-11-19
 

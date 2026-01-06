@@ -4,7 +4,8 @@
     "inmem",
     "rocket",
     "async-graphql",
-    "uuid"
+    "uuid",
+    "indexmap"
   ],
   "nixEnvSelector.nixFile": "${workspaceFolder}/flake.nix"
 }

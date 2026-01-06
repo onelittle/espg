@@ -93,6 +93,7 @@ impl<K: std::cmp::Eq + std::hash::Hash, X: Aggregate> Loadable for HashMap<K, Ve
     }
 }
 
+#[cfg(feature = "indexmap")]
 impl<K: std::cmp::Eq + std::hash::Hash, X: Aggregate> Loadable for indexmap::IndexMap<K, Id<X>> {
     type Output = indexmap::IndexMap<K, Commit<X>>;
 
