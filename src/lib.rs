@@ -18,6 +18,7 @@ pub use error::{Error, Result};
 pub use event_stores::InMemoryEventStore;
 pub use event_stores::PostgresEventStore;
 pub use event_stores::{EventStore, retry_on_version_conflict};
+#[allow(deprecated)]
 pub use id::{Id, id};
 
 #[cfg(feature = "streaming")]

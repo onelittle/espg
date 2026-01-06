@@ -3,7 +3,8 @@
     "streaming",
     "inmem",
     "rocket",
-    "async-graphql"
+    "async-graphql",
+    "uuid"
   ],
   "nixEnvSelector.nixFile": "${workspaceFolder}/flake.nix"
 }

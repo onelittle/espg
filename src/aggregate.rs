@@ -24,10 +24,11 @@ where
     fn snapshot_key() -> Option<&'static str> {
         None
     }
-    fn id(val: impl Into<String>) -> Id<Self>
+
+    fn id(val: impl Into<Id<Self>>) -> Id<Self>
     where
         Self: Sized,
     {
-        crate::id::<Self>(val)
+        val.into()
     }
 }

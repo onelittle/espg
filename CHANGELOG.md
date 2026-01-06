@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `espg::Id<T>` can now be used with `async_graphql` contexts without implementing `espg::Aggregate`
 - `espg::Id<T>` can now be passed by reference to `EventStore::load` to keep ownership at call site
+- `uuid` feature flag
+- `espg::Id<T>` supports `From<&str>`, `From<&String>`, `From<String>` and `From<uuid::Uuid>` (behind `uuid` feature flag)
+
 
 ### Changed
 
@@ -18,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Marked `FromParam::Error` for `espg::Id<T>` as `Infallible`
 - `espg::Id<T>` now differs bet ween `Debug` and `Display` where the former will output with format `ID<T>(value)`
 - `pgmanager` was extracted to its own repository
+- `espg::id` function is deprecated in favor of using `Into<espg::Id>`
 
 ## [0.1.0] - 2025-11-19
 

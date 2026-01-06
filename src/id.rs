@@ -43,6 +43,7 @@ impl<'de, T> Deserialize<'de> for Id<T> {
     }
 }
 
+#[deprecated(note = "Use From<String> or From<&str> instead")]
 pub fn id<T>(id: impl Into<String>) -> Id<T> {
     Id(id.into(), PhantomData)
 }
@@ -65,20 +66,59 @@ impl<T> From<Id<T>> for String {
     }
 }
 
+impl<T> From<String> for Id<T> {
+    fn from(s: String) -> Self {
+        Id(s, PhantomData)
+    }
+}
+
+impl<T> From<&String> for Id<T> {
+    fn from(s: &String) -> Self {
+        s.clone().into()
+    }
+}
+
+impl<T> From<&str> for Id<T> {
+    fn from(s: &str) -> Self {
+        s.to_string().into()
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl<T> From<uuid::Uuid> for Id<T> {
+    fn from(uuid: uuid::Uuid) -> Self {
+        uuid.to_string().into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tests::State;
 
     #[test]
+    #[allow(deprecated)]
     fn test_id_display() {
         let id: Id<State> = id("test_id");
         assert_eq!(id.to_string(), "test_id");
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_id_debug() {
         let id: Id<State> = id("debug_id");
         assert_eq!(format!("{:?}", id), "ID<espg::tests::State>(debug_id)");
+    }
+
+    #[test]
+    fn test_id_from_string() {
+        let id: Id<State> = "from_string".to_string().into();
+        assert_eq!(id, Id("from_string".to_string(), PhantomData));
+    }
+
+    #[test]
+    fn test_id_from_str() {
+        let id: Id<State> = "from_string".into();
+        assert_eq!(id, Id("from_string".to_string(), PhantomData));
     }
 }
