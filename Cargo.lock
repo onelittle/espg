@@ -458,6 +458,19 @@ dependencies = [
 
 [[package]]
 name = "deadpool-postgres"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19be9da496d60d03ec3ab45d960d80a3afb285b787394b83614a79942f467e7f"
+dependencies = [
+ "deadpool",
+ "getrandom 0.2.16",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
+name = "deadpool-postgres"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d697d376cbfa018c23eb4caab1fd1883dd9c906a8c034e8d9a3cb06a7e0bef9"
@@ -591,7 +604,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "778e2ac28f6c47af28e4907f13ffd1e1ddbd400980a9abd7c8df189bf578a5ad"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -600,7 +613,7 @@ version = "0.1.0"
 dependencies = [
  "async-graphql",
  "async-trait",
- "deadpool-postgres",
+ "deadpool-postgres 0.14.1",
  "futures",
  "futures-channel",
  "futures-util",
@@ -610,6 +623,7 @@ dependencies = [
  "mutants",
  "pgmanager",
  "rocket",
+ "rocket_db_pools",
  "serde",
  "serde_json",
  "thiserror",
@@ -1617,6 +1631,29 @@ dependencies = [
  "syn",
  "unicode-xid",
  "version_check",
+]
+
+[[package]]
+name = "rocket_db_pools"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6578b2740ceee3e78bff63fe9299d964b7e68318446cdcb9af3b9cab46e1e9d"
+dependencies = [
+ "deadpool",
+ "deadpool-postgres 0.13.2",
+ "rocket",
+ "rocket_db_pools_codegen",
+ "version_check",
+]
+
+[[package]]
+name = "rocket_db_pools_codegen"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "842e859f2e87a23efc0f81e25756c0fb43f18726e62daf99da7ea19fbc56cebd"
+dependencies = [
+ "devise",
+ "quote",
 ]
 
 [[package]]

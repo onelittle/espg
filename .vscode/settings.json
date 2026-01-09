@@ -3,6 +3,7 @@
     "streaming",
     "inmem",
     "rocket",
+    "rocket_db_pools",
     "async-graphql",
     "uuid",
     "indexmap"

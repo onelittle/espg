@@ -1,4 +1,4 @@
-use espg::{Aggregate, EventStore, Id, PostgresEventStore};
+use espg::{Aggregate, EventStore, Id, PostgresEventStore, StatisticsStore};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::NoTls;
 
@@ -45,11 +45,11 @@ impl Aggregate for AccountState {
 }
 
 struct Commands<'a> {
-    event_store: &'a PostgresEventStore<'a, tokio_postgres::Client>,
+    event_store: &'a PostgresEventStore<&'a mut tokio_postgres::Client>,
 }
 
 impl<'a> Commands<'a> {
-    fn new(event_store: &'a PostgresEventStore<'a, tokio_postgres::Client>) -> Self {
+    fn new(event_store: &'a PostgresEventStore<&'a mut tokio_postgres::Client>) -> Self {
         Commands { event_store }
     }
 

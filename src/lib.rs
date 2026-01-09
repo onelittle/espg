@@ -7,6 +7,8 @@ mod event_stores;
 mod id;
 #[cfg(feature = "rocket")]
 mod rocket;
+#[cfg(feature = "rocket_db_pools")]
+mod rocket_db_pools;
 #[cfg(feature = "streaming")]
 mod subscriber;
 mod util;
@@ -17,6 +19,7 @@ pub use error::{Error, Result};
 #[cfg(feature = "inmem")]
 pub use event_stores::InMemoryEventStore;
 pub use event_stores::PostgresEventStore;
+pub use event_stores::postgres::StatisticsStore;
 pub use event_stores::{EventStore, retry_on_version_conflict};
 #[allow(deprecated)]
 pub use id::{Id, id};

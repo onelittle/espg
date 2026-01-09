@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `espg::Id<T>` supports `From<&str>`, `From<&String>`, `From<String>` and `From<uuid::Uuid>` (behind `uuid` feature flag)
 - `EventStore::all<X: Aggregate>()` to load all aggregates
 - `EventStore::create<X: Aggregate>(event: X::Event) -> Id<X>` to create an aggregate (behind `uuid` feature flag)
+- Support `FromRequest` for `EventStore<rocket_db_pools::Connection<D: rocket_db_pools::Database>>` using `deadpool_postgres` (behind `rocket_db_pools` feature flag)
 
 ### Changed
 

@@ -19,46 +19,23 @@ use serde_json::Value;
 use tokio::task::JoinHandle;
 use tokio_postgres::{GenericClient, types::Json};
 
-pub struct PostgresEventStore<'a, Db> {
-    pub(crate) client: &'a mut Db,
+pub struct PostgresEventStore<Db> {
+    pub(crate) client: Db,
     pub(crate) read_count: AtomicUsize,
     pub(crate) write_count: AtomicUsize,
 }
 
-impl<Db> PostgresEventStore<'_, Db>
-where
-    Db: GenericClient,
-{
-    pub fn new<'a>(client: &'a mut Db) -> PostgresEventStore<'a, Db> {
+impl<Db> PostgresEventStore<Db> {
+    pub fn new(client: Db) -> PostgresEventStore<Db> {
         PostgresEventStore {
             client,
             read_count: AtomicUsize::new(0),
             write_count: AtomicUsize::new(0),
         }
     }
-
-    #[allow(clippy::expect_used)]
-    pub async fn len(&self) -> usize {
-        let row = self
-            .client
-            .query_one("SELECT COUNT(*) FROM events", &[])
-            .await
-            .expect("Failed to count events");
-        row.get::<_, i64>(0) as usize
-    }
-
-    #[allow(clippy::expect_used)]
-    pub async fn is_empty(&self) -> bool {
-        let row = self
-            .client
-            .query_one("SELECT * FROM events LIMIT 1", &[])
-            .await
-            .expect("Failed to count events");
-        row.is_empty()
-    }
 }
 
-impl<'a> PostgresEventStore<'a, tokio_postgres::Client> {
+impl PostgresEventStore<tokio_postgres::Client> {
     #[mutants::skip]
     pub async fn initialize(
         client: &tokio_postgres::Client,
@@ -141,13 +118,58 @@ impl<'a> super::Transaction<tokio_postgres::Transaction<'a>> {
 }
 
 #[async_trait]
-trait GenericClientStore {
+pub(crate) trait GenericClientStore {
     fn get_client(&self) -> &impl GenericClient;
     fn count_read(&self);
     fn count_write(&self);
 }
 
-impl GenericClientStore for PostgresEventStore<'_, tokio_postgres::Client> {
+#[allow(private_bounds)]
+pub trait StatisticsStore: GenericClientStore {
+    #[allow(clippy::expect_used)]
+    fn len(&self) -> impl Future<Output = usize> {
+        async {
+            let row = self
+                .get_client()
+                .query_one("SELECT COUNT(*) FROM events", &[])
+                .await
+                .expect("Failed to count events");
+            row.get::<_, i64>(0) as usize
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    fn is_empty(&self) -> impl Future<Output = bool> {
+        async {
+            let row = self
+                .get_client()
+                .query_one("SELECT * FROM events LIMIT 1", &[])
+                .await
+                .expect("Failed to count events");
+            row.is_empty()
+        }
+    }
+}
+
+impl<T> StatisticsStore for T where T: GenericClientStore {}
+
+impl GenericClientStore for PostgresEventStore<tokio_postgres::Client> {
+    fn get_client(&self) -> &impl GenericClient {
+        &self.client
+    }
+
+    fn count_read(&self) {
+        self.read_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn count_write(&self) {
+        self.write_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl GenericClientStore for PostgresEventStore<&mut tokio_postgres::Client> {
     fn get_client(&self) -> &impl GenericClient {
         self.client
     }
@@ -163,7 +185,7 @@ impl GenericClientStore for PostgresEventStore<'_, tokio_postgres::Client> {
     }
 }
 
-impl GenericClientStore for PostgresEventStore<'_, tokio_postgres::Transaction<'_>> {
+impl GenericClientStore for PostgresEventStore<&mut tokio_postgres::Transaction<'_>> {
     fn get_client(&self) -> &impl GenericClient {
         self.client
     }
@@ -511,7 +533,7 @@ impl<T: GenericClientStore + Sync> EventStore for T {
     }
 }
 
-impl PostgresEventStore<'_, tokio_postgres::Client> {
+impl PostgresEventStore<&mut tokio_postgres::Client> {
     pub async fn transaction<'a>(
         &'a mut self,
     ) -> Result<super::Transaction<tokio_postgres::Transaction<'a>>> {
@@ -717,7 +739,10 @@ mod tests {
 
     async fn event_store<'a, 'b>(
         client: &'a mut tokio_postgres::Client,
-    ) -> std::result::Result<PostgresEventStore<'b, tokio_postgres::Client>, tokio_postgres::Error>
+    ) -> std::result::Result<
+        PostgresEventStore<&'a mut tokio_postgres::Client>,
+        tokio_postgres::Error,
+    >
     where
         'a: 'b,
     {

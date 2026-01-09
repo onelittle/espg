@@ -25,6 +25,7 @@ uuid = { version = "1.17.0", features = ["v4"], optional = true }
 mutants = "0.0.3"
 async-trait = "0.1.88"
 rocket = { version = "0.5.1", optional = true }
+rocket_db_pools = { version = "0.2.0", features = ["deadpool_postgres"], optional = true }
 md-5 = "0.10.6"
 async-graphql = { version = "7.0.19", optional = true }
 itertools = "0.14.0"
@@ -38,6 +39,7 @@ inmem = ["indexmap"]
 indexmap = ["dep:indexmap"]
 streaming = []
 rocket = ["dep:rocket"]
+rocket_db_pools = ["rocket", "dep:rocket_db_pools"]
 async-graphql = ["dep:async-graphql"]
 uuid = ["dep:uuid"]
 
