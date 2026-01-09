@@ -19,6 +19,14 @@ pub use streaming::{StreamItem, StreamingEventStore};
 
 #[async_trait]
 pub trait EventStore: Sync {
+    #[cfg(feature = "uuid")]
+    async fn create<X: Aggregate>(&self, event: X::Event) -> Result<Id<X>> {
+        retry_on_version_conflict(async || {
+            let id: Id<X> = uuid::Uuid::new_v4().into();
+            self.commit(&id, 1, event.clone()).await.map(|_| id)
+        })
+        .await
+    }
     async fn append<X: Aggregate>(&self, id: &Id<X>, event: X::Event) -> Result<()>;
     async fn commit<X: Aggregate + Serialize>(
         &self,
@@ -56,6 +64,7 @@ pub trait EventStore: Sync {
             Err(_) => None,
         }
     }
+    async fn all<X: Aggregate>(&self) -> Option<Vec<Commit<X>>>;
     async fn try_get_commit<X: Aggregate>(&self, id: &Id<X>) -> Result<Commit<X>> {
         let events = self.try_get_events(id).await?;
         let id = id.to_string();

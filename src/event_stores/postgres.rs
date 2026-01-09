@@ -449,6 +449,66 @@ impl<T: GenericClientStore + Sync> EventStore for T {
             }
         }
     }
+
+    async fn all<X: Aggregate>(&self) -> Option<Vec<Commit<X>>> {
+        let rows = self
+            .get_client()
+            .query(
+                "SELECT aggregate_id, version, action, global_seq::text FROM events WHERE aggregate_type = $1 ORDER BY aggregate_id, version",
+                &[&X::NAME],
+            )
+            .await
+            .ok()?;
+        self.count_read();
+
+        use itertools::Itertools;
+        let keyed: Vec<(String, (i32, Value, Txid))> = rows
+            .iter()
+            .map(|row| {
+                let id = row.get::<_, String>(0);
+                let version: i32 = row.get(1);
+                let action: Value = row.get(2);
+                let global_seq: String = row.get(3);
+                let global_seq: Txid = global_seq.try_into()?;
+                Result::Ok((id, (version, action, global_seq)))
+            })
+            .collect::<Result<Vec<_>>>()
+            .ok()?;
+
+        let grouped = keyed.into_iter().into_group_map();
+        let mut commits = vec![];
+        for (id, rows) in grouped {
+            #[allow(clippy::unwrap_used)]
+            let (version, global_seq) = rows
+                .last()
+                .map(|row| {
+                    let version: i32 = row.0;
+                    let global_seq: Txid = row.2;
+                    (version as usize, Some(global_seq))
+                })
+                .unwrap();
+
+            if version == 0 {
+                continue;
+            }
+
+            let mut events: Vec<X::Event> = Vec::with_capacity(rows.len());
+            for row in rows {
+                let action: Value = row.1;
+                events.push(serde_json::from_value(action).ok()?);
+            }
+
+            commits.push(super::Commit {
+                id: id.to_string(),
+                version,
+                diagnostics: None,
+                inner: X::from_slice(&events),
+                global_seq,
+            })
+        }
+
+        Some(commits)
+    }
 }
 
 impl PostgresEventStore<'_, tokio_postgres::Client> {

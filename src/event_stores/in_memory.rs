@@ -235,6 +235,33 @@ impl EventStore for InMemoryEventStore {
             global_seq: None, // Global sequence is not used in this context
         })
     }
+
+    async fn all<X: Aggregate>(&self) -> Option<Vec<Commit<X>>> {
+        let store = self.store.read().await;
+        let mut commits = Vec::new();
+        for (id, tuples) in store.iter() {
+            let inner: Vec<X::Event> = tuples
+                .iter()
+                .filter_map(|(_, event)| {
+                    #[allow(clippy::expect_used)]
+                    event.downcast_ref::<X::Event>()
+                })
+                .cloned()
+                .collect();
+            if inner.is_empty() {
+                continue;
+            }
+            let commit = Commit {
+                id: id.clone(),
+                version: tuples.len(),
+                inner: X::from_slice(&inner),
+                diagnostics: None,
+                global_seq: None,
+            };
+            commits.push(commit);
+        }
+        Some(commits)
+    }
 }
 
 #[cfg(feature = "streaming")]
