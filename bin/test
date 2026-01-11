@@ -1,4 +1,3 @@
 #!/usr/bin/env bash
-PGM_DATABASE_PREFIX="espg_test" \
-  PGM_DATABASE_COUNT="16" \
-  pgmanager wrap -- cargo nextest run --all-features $@
+PGM_DATABASE_COUNT="4" \
+  pgmanager --pgtemp wrap -- cargo nextest run --all-features $@

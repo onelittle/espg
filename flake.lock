@@ -74,15 +74,16 @@
         "nixpkgs": "nixpkgs_2"
       },
       "locked": {
-        "lastModified": 1767340095,
-        "narHash": "sha256-NWcQchyhncavixeC2/RapGPbsepqDBAy/mLG15OPmQ0=",
+        "lastModified": 1768157685,
+        "narHash": "sha256-h7eGi8s6/g05tqfip0d+9P6UNwa5p3wvuDv366rtltc=",
         "owner": "onelittle",
         "repo": "pgmanager",
-        "rev": "00a6fb47c489a8254407be2009974e0a74636be5",
+        "rev": "7cc513eb5cb5d7cc084afa31659637b7a3dac70b",
         "type": "github"
       },
       "original": {
         "owner": "onelittle",
+        "ref": "pgtemp",
         "repo": "pgmanager",
         "type": "github"
       }

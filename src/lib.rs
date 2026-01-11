@@ -139,24 +139,20 @@ mod test_helper {
     use std::sync::atomic::AtomicBool;
 
     pub(crate) struct TestDb {
-        pub(crate) name: pgmanager::DatabaseGuard,
+        pub(crate) config: pgmanager::DatabaseGuard,
         initialized: AtomicBool,
     }
 
-    const SOCKET_PATH: &str = if cfg!(target_os = "macos") {
-        "/tmp"
-    } else {
-        "/var/run/postgresql"
-    };
-
     impl TestDb {
         pub fn connection_string(&self) -> String {
-            format!("postgres:///{}?host={SOCKET_PATH}", self.name)
+            self.config.connection_string()
         }
 
         pub async fn tokio_postgres_config(&self) -> tokio_postgres::Config {
-            let mut config = tokio_postgres::Config::new();
-            config.dbname(&self.name).host_path(SOCKET_PATH);
+            let config = self
+                .connection_string()
+                .parse()
+                .expect("Failed to parse connection string");
             self.initialize(&config)
                 .await
                 .expect("Failed to initialize test database");
@@ -210,9 +206,9 @@ mod test_helper {
     }
 
     pub(crate) async fn get_test_database() -> TestDb {
-        let name = pgmanager::get_database().await;
+        let config = pgmanager::get_database().await;
         TestDb {
-            name,
+            config,
             initialized: AtomicBool::new(false),
         }
     }

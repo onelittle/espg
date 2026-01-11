@@ -2,7 +2,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    pgmanager.url = "github:onelittle/pgmanager";
+    pgmanager.url = "github:onelittle/pgmanager/pgtemp";
   };
 
   outputs = {
