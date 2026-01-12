@@ -23,7 +23,7 @@ tokio-stream = { version = "0.1.17", features = ["sync"] }
 tokio-util = "0.7.15"
 uuid = { version = "1.17.0", features = ["v4"], optional = true }
 mutants = "0.0.3"
-async-trait = "0.1.88"
+async-trait = "0.1.89"
 rocket = { version = "0.5.1", optional = true }
 rocket_db_pools = { version = "0.2.0", features = ["deadpool_postgres"], optional = true }
 md-5 = "0.10.6"
