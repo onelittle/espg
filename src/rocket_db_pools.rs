@@ -23,7 +23,7 @@ impl<D: rocket_db_pools::Database<Pool = rocket_db_pools::deadpool_postgres::Poo
 impl<'r, D: rocket_db_pools::Database<Pool = rocket_db_pools::deadpool_postgres::Pool>>
     FromRequest<'r> for PostgresEventStore<rocket_db_pools::Connection<D>>
 {
-    type Error = ();
+    type Error = Option<rocket_db_pools::Error<rocket_db_pools::deadpool_postgres::PoolError>>;
 
     async fn from_request(
         request: &'r rocket::Request<'_>,
@@ -31,7 +31,6 @@ impl<'r, D: rocket_db_pools::Database<Pool = rocket_db_pools::deadpool_postgres:
         request
             .guard::<rocket_db_pools::Connection<D>>()
             .await
-            .map_error(|_| ((rocket::http::Status::InternalServerError), ()))
             .map(PostgresEventStore::new)
     }
 }
