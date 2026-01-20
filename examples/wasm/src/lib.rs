@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tsify_next::Tsify;
 use wasm_bindgen::prelude::*;
 
 /// Aggregate trait (simplified for wasm - no Send/Sync bounds)
@@ -8,12 +9,14 @@ pub trait Aggregate: Default + Serialize + for<'de> Deserialize<'de> {
 }
 
 // Example: Bank Account
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct AccountState {
     pub balance: i32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub enum AccountEvent {
     Deposit(i32),
     Withdraw(i32),
@@ -32,21 +35,7 @@ impl Aggregate for AccountState {
 }
 
 /// Apply an event to a state and return the new state.
-///
-/// # Arguments
-/// * `state` - JSON object representing the current state (e.g., `{ "balance": 100 }`)
-/// * `event` - JSON object representing the event (e.g., `{ "Deposit": 50 }`)
-///
-/// # Returns
-/// JSON object representing the new state
 #[wasm_bindgen]
-pub fn apply_event(state: JsValue, event: JsValue) -> Result<JsValue, JsValue> {
-    let state: AccountState =
-        serde_wasm_bindgen::from_value(state).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let event: AccountEvent =
-        serde_wasm_bindgen::from_value(event).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-    let new_state = state.reduce(&event);
-
-    serde_wasm_bindgen::to_value(&new_state).map_err(|e| JsValue::from_str(&e.to_string()))
+pub fn apply_event(state: AccountState, event: AccountEvent) -> AccountState {
+    state.reduce(&event)
 }
