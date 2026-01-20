@@ -8,5 +8,6 @@
     "uuid",
     "indexmap"
   ],
-  "nixEnvSelector.nixFile": "${workspaceFolder}/flake.nix"
+  "nixEnvSelector.nixFile": "${workspaceFolder}/flake.nix",
+  "git.enabled": false
 }

@@ -23,6 +23,9 @@
             rustfmt
             cargo-nextest
             cargo-all-features
+            lld
+            wasm-pack
+            wasm-bindgen-cli
           ];
 
           packages = [
