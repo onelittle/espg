@@ -22,6 +22,7 @@
             clippy
             rustfmt
             cargo-nextest
+            cargo-all-features
           ];
 
           packages = [
