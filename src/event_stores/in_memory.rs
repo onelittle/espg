@@ -262,6 +262,24 @@ impl EventStore for InMemoryEventStore {
         }
         Some(commits)
     }
+
+    #[cfg(feature = "streaming")]
+    async fn get_subscription_state<A: Aggregate + 'static, S: crate::Subscriber<A>>(
+        &self,
+    ) -> Result<crate::subscriber::SubscriptionState<A, S>> {
+        use crate::subscriber::SubscriptionState;
+
+        let subs = self.subscriptions.read().await;
+        let row = subs
+            .get(&(S::NAME.to_string(), A::NAME.to_string()))
+            .copied();
+        let txid = row.unwrap_or(Txid(0));
+        Ok(SubscriptionState {
+            last_seq: txid,
+            marker: std::marker::PhantomData,
+            aggregate_marker: std::marker::PhantomData,
+        })
+    }
 }
 
 #[cfg(feature = "streaming")]

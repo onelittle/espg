@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `EventStore::all<X: Aggregate>()` to load all aggregates
 - `EventStore::create<X: Aggregate>(event: X::Event) -> Id<X>` to create an aggregate (behind `uuid` feature flag)
 - Support `FromRequest` for `EventStore<rocket_db_pools::Connection<D: rocket_db_pools::Database>>` using `deadpool_postgres` (behind `rocket_db_pools` feature flag)
+- `EventStore::get_subscription_state` (behind `streaming` flag)
 
 ### Changed
 

@@ -1,6 +1,6 @@
 #[cfg(feature = "inmem")]
 use crate::event_stores::InMemoryEventStore;
-use crate::{Aggregate, Commit, EventStore};
+use crate::{Aggregate, Commit, EventStore, util::Txid};
 use futures::StreamExt;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -25,6 +25,12 @@ impl Subscription {
             },
         }
     }
+}
+
+pub struct SubscriptionState<T: Aggregate + 'static, S: Subscriber<T>> {
+    pub last_seq: Txid,
+    pub marker: std::marker::PhantomData<S>,
+    pub aggregate_marker: std::marker::PhantomData<T>,
 }
 
 pub trait Subscriber<T: Aggregate + 'static> {
@@ -294,18 +300,10 @@ mod tests {
         let subscriber = TestSubscriber::default();
         subscriber.start_postgres(config).await.unwrap();
 
-        // It should save a subscription in the database
-        let row = client
-            .query_one(
-                "SELECT * FROM subscriptions WHERE name = $1 AND aggregate_type = $2",
-                &[&TestSubscriber::NAME, &State::NAME],
-            )
-            .await
-            .ok();
-        assert!(row.is_some());
-        let row = row.unwrap();
-        assert_eq!(row.get::<_, String>(1), TestSubscriber::NAME);
-        assert_eq!(row.get::<_, String>(2), State::NAME);
+        let event_store = PostgresEventStore::new(client);
+        let sub_state: SubscriptionState<State, TestSubscriber> =
+            event_store.get_subscription_state().await?;
+        assert_eq!(sub_state.last_seq, Txid(0));
 
         Ok(())
     }
@@ -369,12 +367,9 @@ mod tests {
         let subscriber = TestSubscriber::default();
         subscriber.start_inmem(event_store.clone()).await.unwrap();
 
-        // It should save a subscription in the database
-        let subs = event_store.subscriptions.read().await;
-        let row = subs.get(&(TestSubscriber::NAME.to_string(), State::NAME.to_string()));
-        assert!(row.is_some());
-        let offset = row.unwrap();
-        assert_eq!(*offset, Txid(0));
+        let sub_state: SubscriptionState<State, TestSubscriber> =
+            event_store.get_subscription_state().await?;
+        assert_eq!(sub_state.last_seq, Txid(0));
 
         Ok(())
     }

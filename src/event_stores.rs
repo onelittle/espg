@@ -9,6 +9,8 @@ use std::sync::atomic::AtomicUsize;
 
 use crate::{Aggregate, Commit, Id, util::Loadable};
 pub use crate::{Error, Result};
+#[cfg(feature = "streaming")]
+use crate::{Subscriber, subscriber::SubscriptionState};
 use async_trait::async_trait;
 #[cfg(feature = "inmem")]
 pub use in_memory::InMemoryEventStore;
@@ -119,6 +121,11 @@ pub trait EventStore: Sync {
     {
         value.load(self)
     }
+
+    #[cfg(feature = "streaming")]
+    async fn get_subscription_state<A: Aggregate + 'static, S: Subscriber<A>>(
+        &self,
+    ) -> Result<SubscriptionState<A, S>>;
 }
 
 pub struct Transaction<T> {

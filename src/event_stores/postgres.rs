@@ -1,13 +1,17 @@
 use std::sync::atomic::AtomicUsize;
 
 use super::{Error, Result};
-#[cfg(feature = "streaming")]
-use crate::event_stores::streaming::{EventStream, StreamItem, StreamingEventStore};
 use crate::{
     Aggregate, EventStore, Id,
     commit::{Commit, Diagnostics},
     event_stores::Transaction,
     util::Txid,
+};
+#[cfg(feature = "streaming")]
+use crate::{
+    Subscriber,
+    event_stores::streaming::{EventStream, StreamItem, StreamingEventStore},
+    subscriber::SubscriptionState,
 };
 use async_trait::async_trait;
 #[cfg(feature = "streaming")]
@@ -530,6 +534,26 @@ impl<T: GenericClientStore + Sync> EventStore for T {
         }
 
         Some(commits)
+    }
+
+    #[cfg(feature = "streaming")]
+    async fn get_subscription_state<A: Aggregate + 'static, S: Subscriber<A>>(
+        &self,
+    ) -> Result<SubscriptionState<A, S>> {
+        // It should save a subscription in the database
+        let row = self
+            .get_client()
+            .query_one(
+                "SELECT * FROM subscriptions WHERE name = $1 AND aggregate_type = $2",
+                &[&S::NAME, &A::NAME],
+            )
+            .await?;
+        let txid = Txid::try_from(row.get::<_, String>(3)).map_err(Error::TxIdParsingError)?;
+        Ok(SubscriptionState {
+            last_seq: txid,
+            marker: std::marker::PhantomData,
+            aggregate_marker: std::marker::PhantomData,
+        })
     }
 }
 
