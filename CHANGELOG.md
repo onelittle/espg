@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-02-11
+
 ### Added
 
 - `espg::Id<T>` can now be used with `async_graphql` contexts without implementing `espg::Aggregate`
@@ -33,5 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release
 
-[unreleased]: https://github.com/onelittle/espg/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/onelittle/espg/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/onelittle/espg/releases/tag/v0.2.0
 [0.1.0]: https://github.com/onelittle/espg/releases/tag/v0.1.0
